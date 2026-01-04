@@ -1,0 +1,37 @@
+# PowerShell temporary files
+*.ps1.bak
+*.ps1~
+*.tmp
+
+# Log files
+*.log
+error.log
+install.log
+debug.log
+
+# Data files (runtime data, not source code)
+queue.jsonl
+last_send.txt
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Package files (build artifacts)
+*.zip
+*.7z
+
+# Cursor IDE
+.cursor/
+
+# OS
+.DS_Store
+

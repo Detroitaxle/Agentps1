@@ -1,0 +1,388 @@
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    GUI Installation Wizard for PC Monitoring Agent
+.DESCRIPTION
+    Provides a Windows Forms-based GUI for configuring and installing the monitoring agent.
+    Requires Administrator privileges to create registry keys and scheduled tasks.
+#>
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+#region GUI Form Creation
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "PC Monitoring Agent - Installation Wizard"
+$form.Size = New-Object System.Drawing.Size(600, 450)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.TopMost = $true
+
+#endregion
+
+#region Global Variables
+
+$script:connectionTested = $false
+$script:testResult = $null
+
+#endregion
+
+#region Helper Functions
+
+function Test-UrlFormat {
+    param([string]$Url)
+    
+    try {
+        $uri = [System.Uri]::new($Url)
+        return ($uri.Scheme -eq "http" -or $uri.Scheme -eq "https") -and $uri.Host -ne ""
+    } catch {
+        return $false
+    }
+}
+
+function Test-ApiConnection {
+    param(
+        [string]$ApiUrl,
+        [string]$ApiKey
+    )
+    
+    try {
+        $headers = @{
+            "Content-Type" = "application/json"
+            "X-API-KEY" = $ApiKey
+        }
+        
+        # Send a minimal test request (OPTIONS or GET, or minimal POST)
+        # Many APIs will respond to OPTIONS, or we can try a GET to the root
+        $testUri = $ApiUrl.TrimEnd('/')
+        
+        # Try a simple request - use GET if possible, otherwise OPTIONS
+        try {
+            $response = Invoke-WebRequest -Uri $testUri -Method Get -Headers $headers -TimeoutSec 10 -ErrorAction Stop
+            return @{ Success = $true; Message = "Connection successful" }
+        } catch {
+            # If GET fails, it might still be a valid endpoint (some APIs only accept POST)
+            # Check if we got an HTTP response (meaning the server is reachable)
+            $httpException = $_.Exception
+            if ($httpException.Response) {
+                # Check if it's a 405 (Method Not Allowed) which means the endpoint exists
+                try {
+                    $statusCode = $httpException.Response.StatusCode.value__
+                    if ($statusCode -eq 405) {
+                        return @{ Success = $true; Message = "Endpoint exists (method not allowed for GET, but endpoint is valid)" }
+                    }
+                } catch {
+                    # StatusCode access failed, but we have a Response, so server is reachable
+                }
+                # For any HTTP response, assume endpoint might be POST-only and consider it potentially valid
+                return @{ Success = $true; Message = "Server responded (endpoint may require POST)" }
+            }
+            throw
+        }
+    } catch {
+        return @{ Success = $false; Message = "Connection failed: $($_.Exception.Message)" }
+    }
+}
+
+function Install-Agent {
+    param(
+        [string]$ApiUrl,
+        [string]$ApiKey,
+        [string]$ScriptPath
+    )
+    
+    $TaskName = "MyPCMonitor"
+    $RegistryPath = "HKLM:\SOFTWARE\MyMonitoringAgent"
+    $DataDirectory = "C:\ProgramData\MyAgent"
+    
+    try {
+        # Create registry keys
+        if (-not (Test-Path $RegistryPath)) {
+            $null = New-Item -Path $RegistryPath -Force
+        }
+        Set-ItemProperty -Path $RegistryPath -Name "ApiUrl" -Value $ApiUrl -Type String
+        Set-ItemProperty -Path $RegistryPath -Name "ApiKey" -Value $ApiKey -Type String
+        
+        # Create data directory
+        if (-not (Test-Path $DataDirectory)) {
+            $null = New-Item -ItemType Directory -Path $DataDirectory -Force
+        }
+        
+        # Ensure script directory exists and copy script if needed
+        $scriptDir = Split-Path -Path $ScriptPath -Parent
+        if (-not (Test-Path $scriptDir)) {
+            $null = New-Item -ItemType Directory -Path $scriptDir -Force
+        }
+        
+        # Copy Agent.ps1 to target location if it's different from current location
+        $currentScript = if ($PSScriptRoot) {
+            Join-Path $PSScriptRoot "Agent.ps1"
+        } else {
+            Join-Path (Get-Location) "Agent.ps1"
+        }
+        
+        if (Test-Path $currentScript) {
+            $currentScriptResolved = (Resolve-Path $currentScript).Path
+            $targetScriptResolved = if (Test-Path $ScriptPath) {
+                (Resolve-Path $ScriptPath).Path
+            } else {
+                $ScriptPath
+            }
+            
+            if ($currentScriptResolved -ne $targetScriptResolved) {
+                Copy-Item -Path $currentScript -Destination $ScriptPath -Force
+            }
+        } elseif (-not (Test-Path $ScriptPath)) {
+            throw "Agent.ps1 not found in script directory and target path does not exist"
+        }
+        
+        # Remove existing task if it exists
+        $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($existingTask) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        }
+        
+        # Create scheduled task action
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+        
+        # Create scheduled task trigger (every 1 minute)
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
+        
+        # Create scheduled task principal (run as SYSTEM)
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        
+        # Create scheduled task settings
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false
+        
+        # Register the scheduled task
+        $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "PC Monitoring Agent - Sends heartbeat data to monitoring API"
+        
+        # Start the task immediately
+        Start-ScheduledTask -TaskName $TaskName
+        
+        return @{ Success = $true; Message = "Installation completed successfully!" }
+    } catch {
+        return @{ Success = $false; Message = "Installation failed: $($_.Exception.Message)" }
+    }
+}
+
+#endregion
+
+#region GUI Controls
+
+# API URL Label and TextBox
+$lblApiUrl = New-Object System.Windows.Forms.Label
+$lblApiUrl.Location = New-Object System.Drawing.Point(20, 20)
+$lblApiUrl.Size = New-Object System.Drawing.Size(200, 20)
+$lblApiUrl.Text = "API Endpoint URL:"
+$form.Controls.Add($lblApiUrl)
+
+$txtApiUrl = New-Object System.Windows.Forms.TextBox
+$txtApiUrl.Location = New-Object System.Drawing.Point(20, 45)
+$txtApiUrl.Size = New-Object System.Drawing.Size(540, 23)
+$txtApiUrl.TabIndex = 0
+$form.Controls.Add($txtApiUrl)
+
+# API Key Label and TextBox
+$lblApiKey = New-Object System.Windows.Forms.Label
+$lblApiKey.Location = New-Object System.Drawing.Point(20, 85)
+$lblApiKey.Size = New-Object System.Drawing.Size(200, 20)
+$lblApiKey.Text = "API Key:"
+$form.Controls.Add($lblApiKey)
+
+$txtApiKey = New-Object System.Windows.Forms.TextBox
+$txtApiKey.Location = New-Object System.Drawing.Point(20, 110)
+$txtApiKey.Size = New-Object System.Drawing.Size(540, 23)
+$txtApiKey.PasswordChar = '*'
+$txtApiKey.TabIndex = 1
+$form.Controls.Add($txtApiKey)
+
+# Script Path Label and TextBox
+$lblScriptPath = New-Object System.Windows.Forms.Label
+$lblScriptPath.Location = New-Object System.Drawing.Point(20, 150)
+$lblScriptPath.Size = New-Object System.Drawing.Size(200, 20)
+$lblScriptPath.Text = "Agent.ps1 Location:"
+$form.Controls.Add($lblScriptPath)
+
+$txtScriptPath = New-Object System.Windows.Forms.TextBox
+$txtScriptPath.Location = New-Object System.Drawing.Point(20, 175)
+$txtScriptPath.Size = New-Object System.Drawing.Size(450, 23)
+$txtScriptPath.Text = "$env:ProgramFiles\MyAgent\Agent.ps1"
+$txtScriptPath.TabIndex = 2
+$form.Controls.Add($txtScriptPath)
+
+# Browse Button
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Location = New-Object System.Drawing.Point(480, 174)
+$btnBrowse.Size = New-Object System.Drawing.Size(80, 25)
+$btnBrowse.Text = "Browse..."
+$btnBrowse.TabIndex = 3
+$btnBrowse.Add_Click({
+    $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $openFileDialog.Filter = "PowerShell Scripts (*.ps1)|*.ps1|All Files (*.*)|*.*"
+    $openFileDialog.Title = "Select Agent.ps1"
+    if ($openFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtScriptPath.Text = $openFileDialog.FileName
+    }
+})
+$form.Controls.Add($btnBrowse)
+
+# Status Label
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Location = New-Object System.Drawing.Point(20, 210)
+$lblStatus.Size = New-Object System.Drawing.Size(540, 40)
+$lblStatus.Text = ""
+$lblStatus.ForeColor = [System.Drawing.Color]::Blue
+$form.Controls.Add($lblStatus)
+
+# Test Connection Button
+$btnTestConnection = New-Object System.Windows.Forms.Button
+$btnTestConnection.Location = New-Object System.Drawing.Point(20, 260)
+$btnTestConnection.Size = New-Object System.Drawing.Size(130, 30)
+$btnTestConnection.Text = "Test Connection"
+$btnTestConnection.TabIndex = 4
+$btnTestConnection.Add_Click({
+    $lblStatus.Text = "Testing connection..."
+    $lblStatus.ForeColor = [System.Drawing.Color]::Blue
+    $form.Refresh()
+    
+    # Validate inputs
+    if ([string]::IsNullOrWhiteSpace($txtApiUrl.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Please enter an API URL.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        $lblStatus.Text = ""
+        return
+    }
+    
+    if (-not (Test-UrlFormat -Url $txtApiUrl.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Invalid URL format. Please enter a valid HTTP or HTTPS URL.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        $lblStatus.Text = ""
+        return
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($txtApiKey.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Please enter an API Key.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        $lblStatus.Text = ""
+        return
+    }
+    
+    # Test connection
+    $result = Test-ApiConnection -ApiUrl $txtApiUrl.Text -ApiKey $txtApiKey.Text
+    $script:connectionTested = $true
+    $script:testResult = $result
+    
+    if ($result.Success) {
+        $lblStatus.Text = "✓ Connection test successful!"
+        $lblStatus.ForeColor = [System.Drawing.Color]::Green
+        [System.Windows.Forms.MessageBox]::Show($result.Message, "Connection Test Successful", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    } else {
+        $lblStatus.Text = "✗ Connection test failed"
+        $lblStatus.ForeColor = [System.Drawing.Color]::Red
+        [System.Windows.Forms.MessageBox]::Show($result.Message, "Connection Test Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+})
+$form.Controls.Add($btnTestConnection)
+
+# Install Button
+$btnInstall = New-Object System.Windows.Forms.Button
+$btnInstall.Location = New-Object System.Drawing.Point(430, 260)
+$btnInstall.Size = New-Object System.Drawing.Size(130, 30)
+$btnInstall.Text = "Install"
+$btnInstall.TabIndex = 5
+$btnInstall.Add_Click({
+    # Validate inputs
+    if ([string]::IsNullOrWhiteSpace($txtApiUrl.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Please enter an API URL.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    if (-not (Test-UrlFormat -Url $txtApiUrl.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Invalid URL format. Please enter a valid HTTP or HTTPS URL.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($txtApiKey.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Please enter an API Key.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($txtScriptPath.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Please specify the Agent.ps1 script path.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    # Check if script exists (or will be copied)
+    $currentScript = if ($PSScriptRoot) {
+        Join-Path $PSScriptRoot "Agent.ps1"
+    } else {
+        Join-Path (Get-Location) "Agent.ps1"
+    }
+    if (-not (Test-Path $currentScript) -and -not (Test-Path $txtScriptPath.Text)) {
+        [System.Windows.Forms.MessageBox]::Show("Agent.ps1 not found. Please ensure Agent.ps1 is in the same directory as this installer, or specify an existing script path.", "File Not Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        return
+    }
+    
+    # Warn if connection not tested
+    if (-not $script:connectionTested) {
+        $result = [System.Windows.Forms.MessageBox]::Show("You haven't tested the connection. Do you want to continue with installation anyway?", "Confirm Installation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+            return
+        }
+    } elseif ($script:testResult -and -not $script:testResult.Success) {
+        $result = [System.Windows.Forms.MessageBox]::Show("Connection test failed. Do you want to continue with installation anyway?", "Confirm Installation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+            return
+        }
+    }
+    
+    # Disable buttons during installation
+    $btnInstall.Enabled = $false
+    $btnTestConnection.Enabled = $false
+    $btnBrowse.Enabled = $false
+    
+    $lblStatus.Text = "Installing..."
+    $lblStatus.ForeColor = [System.Drawing.Color]::Blue
+    $form.Refresh()
+    
+    # Perform installation
+    $installResult = Install-Agent -ApiUrl $txtApiUrl.Text -ApiKey $txtApiKey.Text -ScriptPath $txtScriptPath.Text
+    
+    if ($installResult.Success) {
+        $lblStatus.Text = "Installation completed successfully!"
+        $lblStatus.ForeColor = [System.Drawing.Color]::Green
+        [System.Windows.Forms.MessageBox]::Show($installResult.Message + "`n`nThe monitoring agent will start running immediately and continue after system reboots.", "Installation Successful", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        $form.Close()
+    } else {
+        $lblStatus.Text = "Installation failed"
+        $lblStatus.ForeColor = [System.Drawing.Color]::Red
+        [System.Windows.Forms.MessageBox]::Show($installResult.Message, "Installation Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        $btnInstall.Enabled = $true
+        $btnTestConnection.Enabled = $true
+        $btnBrowse.Enabled = $true
+    }
+})
+$form.Controls.Add($btnInstall)
+
+# Cancel Button
+$btnCancel = New-Object System.Windows.Forms.Button
+$btnCancel.Location = New-Object System.Drawing.Point(290, 260)
+$btnCancel.Size = New-Object System.Drawing.Size(130, 30)
+$btnCancel.Text = "Cancel"
+$btnCancel.TabIndex = 6
+$btnCancel.Add_Click({
+    $form.Close()
+})
+$form.Controls.Add($btnCancel)
+
+#endregion
+
+#region Main Execution
+
+# Show the form
+[System.Windows.Forms.Application]::Run($form)
+
+#endregion
+
