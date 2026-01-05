@@ -18,10 +18,18 @@ The GUI Installation Wizard provides the easiest and most user-friendly installa
 
 1. **Extract the ZIP package** to a folder on your computer
 
-2. **Right-click** on `Install-Wizard.ps1` and select **"Run with PowerShell"**
-   - If you see a security warning, you may need to:
-     - Right-click → Properties → Unblock (if available)
-     - Or run from PowerShell as Administrator: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process` then run the script
+2. **Run the installer:**
+   
+   **RECOMMENDED METHOD - Using the batch file:**
+   - **Right-click** on `Install-Wizard.bat` and select **"Run as administrator"**
+   - This automatically handles execution policy, checks for admin privileges, and shows clear error messages
+   - If you see an error about Administrator privileges, make sure you selected "Run as administrator"
+   
+   **Alternative - Using PowerShell directly (Advanced):**
+   - Open PowerShell as Administrator (search for "PowerShell" in Start menu, right-click, select "Run as administrator")
+   - Navigate to the folder: `cd "C:\path\to\extracted\folder"`
+   - Run: `.\Install-Wizard.ps1`
+   - **Note**: Right-clicking `Install-Wizard.ps1` and selecting "Run with PowerShell" will NOT work because it doesn't run as Administrator
 
 3. **Enter your configuration:**
    - **API Endpoint URL**: The full URL to your monitoring API (e.g., `https://api.example.com/heartbeat`)

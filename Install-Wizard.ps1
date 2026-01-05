@@ -8,8 +8,55 @@
     Requires Administrator privileges to create registry keys and scheduled tasks.
 #>
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+# Error handling wrapper
+$ErrorActionPreference = "Stop"
+
+# Try to load Windows Forms early for error messages
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+} catch {
+    # If we can't load Forms, we'll use Write-Host for errors
+}
+
+try {
+    # Check for administrator privileges
+    $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    
+    if (-not $isAdmin) {
+        $errorMsg = "This installation wizard requires Administrator privileges.`n`n" +
+                    "RECOMMENDED: Use Install-Wizard.bat and right-click 'Run as administrator'`n`n" +
+                    "Or run PowerShell as Administrator and execute: .\Install-Wizard.ps1"
+        try {
+            [System.Windows.Forms.MessageBox]::Show(
+                $errorMsg,
+                "Administrator Required",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            )
+        } catch {
+            Write-Host $errorMsg -ForegroundColor Red
+            Write-Host "`nPress any key to exit..."
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        }
+        exit 1
+    }
+    
+    # Load required assemblies (now that we know we're admin)
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+} catch {
+    $errorMsg = "Failed to initialize: $($_.Exception.Message)`n`nPlease ensure you are running as Administrator and that Windows Forms is available.`n`nTry using Install-Wizard.bat instead."
+    try {
+        [System.Windows.Forms.MessageBox]::Show($errorMsg, "Initialization Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    } catch {
+        Write-Host $errorMsg -ForegroundColor Red
+        Write-Host "`nPress any key to exit..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    exit 1
+}
 
 #region GUI Form Creation
 
@@ -56,30 +103,40 @@ function Test-ApiConnection {
             "X-API-KEY" = $ApiKey
         }
         
-        # Send a minimal test request (OPTIONS or GET, or minimal POST)
-        # Many APIs will respond to OPTIONS, or we can try a GET to the root
-        $testUri = $ApiUrl.TrimEnd('/')
+        # Create a minimal test payload similar to what Agent.ps1 sends
+        $testPayload = @{
+            computerId = "test-connection"
+            computerName = "TEST"
+            username = "TEST"
+            online = $true
+            pcStatus = "on"
+            pcUptime = "00:00:00"
+            idleTimeSeconds = 0
+            timestamp = (Get-Date).ToUniversalTime().ToString("o")
+        } | ConvertTo-Json -Compress
         
-        # Try a simple request - use GET if possible, otherwise OPTIONS
+        # Use Invoke-RestMethod like Agent.ps1 does
         try {
-            $response = Invoke-WebRequest -Uri $testUri -Method Get -Headers $headers -TimeoutSec 10 -ErrorAction Stop
-            return @{ Success = $true; Message = "Connection successful" }
+            $response = Invoke-RestMethod -Uri $ApiUrl -Method Post -Headers $headers -Body $testPayload -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
+            $responseJson = if ($response) { $response | ConvertTo-Json -Compress } else { "OK" }
+            return @{ Success = $true; Message = "Connection successful - API responded with: $responseJson" }
         } catch {
-            # If GET fails, it might still be a valid endpoint (some APIs only accept POST)
             # Check if we got an HTTP response (meaning the server is reachable)
             $httpException = $_.Exception
             if ($httpException.Response) {
-                # Check if it's a 405 (Method Not Allowed) which means the endpoint exists
                 try {
                     $statusCode = $httpException.Response.StatusCode.value__
-                    if ($statusCode -eq 405) {
-                        return @{ Success = $true; Message = "Endpoint exists (method not allowed for GET, but endpoint is valid)" }
+                    # 400 Bad Request might mean the endpoint exists but payload is wrong (which is OK for testing)
+                    # 401/403 means auth issue, but endpoint exists
+                    if ($statusCode -in @(400, 401, 403)) {
+                        return @{ Success = $true; Message = "Server responded (Status $statusCode) - endpoint is reachable" }
                     }
+                    # Other 4xx/5xx means server responded
+                    return @{ Success = $false; Message = "Server responded with HTTP $statusCode - check API endpoint and key" }
                 } catch {
                     # StatusCode access failed, but we have a Response, so server is reachable
+                    return @{ Success = $true; Message = "Server responded (endpoint is reachable)" }
                 }
-                # For any HTTP response, assume endpoint might be POST-only and consider it potentially valid
-                return @{ Success = $true; Message = "Server responded (endpoint may require POST)" }
             }
             throw
         }
@@ -275,11 +332,11 @@ $btnTestConnection.Add_Click({
     $script:testResult = $result
     
     if ($result.Success) {
-        $lblStatus.Text = "✓ Connection test successful!"
+        $lblStatus.Text = "[OK] Connection test successful!"
         $lblStatus.ForeColor = [System.Drawing.Color]::Green
         [System.Windows.Forms.MessageBox]::Show($result.Message, "Connection Test Successful", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
     } else {
-        $lblStatus.Text = "✗ Connection test failed"
+        $lblStatus.Text = "[FAILED] Connection test failed"
         $lblStatus.ForeColor = [System.Drawing.Color]::Red
         [System.Windows.Forms.MessageBox]::Show($result.Message, "Connection Test Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
     }
@@ -327,7 +384,7 @@ $btnInstall.Add_Click({
     
     # Warn if connection not tested
     if (-not $script:connectionTested) {
-        $result = [System.Windows.Forms.MessageBox]::Show("You haven't tested the connection. Do you want to continue with installation anyway?", "Confirm Installation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+        $result = [System.Windows.Forms.MessageBox]::Show("You have not tested the connection. Do you want to continue with installation anyway?", "Confirm Installation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
         if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
             return
         }
@@ -381,8 +438,20 @@ $form.Controls.Add($btnCancel)
 
 #region Main Execution
 
-# Show the form
-[System.Windows.Forms.Application]::Run($form)
+try {
+    # Show the form
+    [System.Windows.Forms.Application]::Run($form)
+} catch {
+    $errorMsg = "An error occurred while running the wizard: $($_.Exception.Message)"
+    try {
+        [System.Windows.Forms.MessageBox]::Show($errorMsg, "Runtime Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+    } catch {
+        Write-Host $errorMsg -ForegroundColor Red
+        Write-Host "Press any key to exit..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    exit 1
+}
 
 #endregion
 

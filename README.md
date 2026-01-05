@@ -19,7 +19,9 @@ The monitoring agent (`Agent.ps1`) runs every minute via Windows Task Scheduler 
 
 The easiest way to install the monitoring agent is using the GUI installation wizard:
 
-1. **Right-click** `Install-Wizard.ps1` and select **"Run with PowerShell"** (or run from an Administrator PowerShell prompt)
+1. **Right-click** `Install-Wizard.bat` and select **"Run as administrator"**
+   - This is the recommended method and handles all requirements automatically
+   - **Note**: Do NOT use "Run with PowerShell" on the .ps1 file directly - it won't work without admin privileges
 2. The installation wizard will open with a user-friendly interface
 3. Enter your **API Endpoint URL** and **API Key**
 4. The script path defaults to `C:\Program Files\MyAgent\Agent.ps1` (you can change this if needed)
