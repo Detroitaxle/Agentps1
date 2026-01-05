@@ -44,7 +44,7 @@ Write-Host ""
 
 Write-Host "=== HTTP HEADERS ===" -ForegroundColor Cyan
 Write-Host "Content-Type: application/json" -ForegroundColor Gray
-Write-Host "X-API-KEY: f47ac10b-58cc-4372-a567-0e02b2c3d479" -ForegroundColor Gray
+Write-Host "X-API-KEY: <your-api-key>" -ForegroundColor Gray
 Write-Host ""
 
 Write-Host "Press any key to exit..."

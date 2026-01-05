@@ -1,12 +1,12 @@
 # Test Heartbeat Script - Send fake data to API
-# Usage: .\test-heartbeat.ps1 -ApiUrl "https://workpulse.replit.app/api/heartbeat" -ApiKey "your-key" -IdleTimeSeconds 600
+# Usage: .\test-heartbeat.ps1 -ApiUrl "https://your-api.com/heartbeat" -ApiKey "your-api-key" -IdleTimeSeconds 600
 
 param(
-    [Parameter(Mandatory=$false)]
-    [string]$ApiUrl = "https://workpulse.replit.app/api/heartbeat",
+    [Parameter(Mandatory=$true)]
+    [string]$ApiUrl,
     
-    [Parameter(Mandatory=$false)]
-    [string]$ApiKey = "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    [Parameter(Mandatory=$true)]
+    [string]$ApiKey,
     
     [Parameter(Mandatory=$false)]
     [int]$IdleTimeSeconds = 0,
