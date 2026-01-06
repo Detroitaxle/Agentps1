@@ -138,9 +138,6 @@ public class IdleTimeHelper {
     static extern bool SetThreadToken(ref IntPtr Thread, IntPtr Token);
     
     [DllImport("kernel32.dll")]
-    static extern IntPtr GetCurrentProcess();
-    
-    [DllImport("kernel32.dll")]
     static extern IntPtr GetCurrentThread();
     
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -219,16 +216,16 @@ public class IdleTimeHelper {
                 return 0;
             }
             
-            // Try to open the session's token and impersonate it
-            IntPtr hToken = IntPtr.Zero;
+            // Try to get the session's user token and impersonate it
+            IntPtr hSessionToken = IntPtr.Zero;
             IntPtr hDupToken = IntPtr.Zero;
             IntPtr hThread = GetCurrentThread();
             
             try {
-                // Open the process token (we need SeDebugPrivilege for this to work)
-                IntPtr hProcess = GetCurrentProcess();
-                if (OpenProcessToken(hProcess, TOKEN_QUERY | TOKEN_DUPLICATE, out hToken)) {
-                    if (DuplicateTokenEx(hToken, TOKEN_QUERY | TOKEN_DUPLICATE, IntPtr.Zero, SecurityImpersonation, TokenImpersonation, out hDupToken)) {
+                // Get the user token for the active session
+                if (WTSQueryUserToken(activeSessionId, out hSessionToken)) {
+                    // Duplicate the token for impersonation
+                    if (DuplicateTokenEx(hSessionToken, TOKEN_QUERY | TOKEN_DUPLICATE, IntPtr.Zero, SecurityImpersonation, TokenImpersonation, out hDupToken)) {
                         // Impersonate the token
                         if (SetThreadToken(ref hThread, hDupToken)) {
                             // Now try GetLastInputInfo again in the impersonated context
@@ -261,7 +258,7 @@ public class IdleTimeHelper {
                 }
             } finally {
                 if (hDupToken != IntPtr.Zero) CloseHandle(hDupToken);
-                if (hToken != IntPtr.Zero) CloseHandle(hToken);
+                if (hSessionToken != IntPtr.Zero) CloseHandle(hSessionToken);
             }
         } catch {
             // Impersonation failed, return 0
