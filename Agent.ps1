@@ -12,8 +12,10 @@ $RegistryPath = "HKLM:\SOFTWARE\MyMonitoringAgent"
 $DataDirectory = "C:\ProgramData\MyAgent"
 $QueueFile = Join-Path $DataDirectory "queue.jsonl"
 $ErrorLogFile = Join-Path $DataDirectory "error.log"
+$HeartbeatLogFile = Join-Path $DataDirectory "heartbeat.log"
 $LastSendFile = Join-Path $DataDirectory "last_send.txt"
 $MaxQueueSizeMB = 10
+$MaxHeartbeatLogSizeMB = 10  # Maximum size for heartbeat log before rotation
 $BatchSize = 50
 $AdaptivePollingThreshold = 600  # seconds (10 minutes)
 $AdaptivePollingInterval = 300   # seconds (5 minutes)
@@ -29,6 +31,55 @@ function Write-ErrorLog {
         Add-Content -Path $ErrorLogFile -Value $LogMessage -ErrorAction Stop
     } catch {
         # If we can't write to error log, there's not much we can do
+    }
+}
+
+function Write-HeartbeatLog {
+    param(
+        [string]$Payload,
+        [string]$Response = $null
+    )
+    
+    try {
+        # Ensure directory exists
+        $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
+        
+        # Check log file size and rotate if needed
+        if (Test-Path $HeartbeatLogFile) {
+            $fileInfo = Get-Item $HeartbeatLogFile
+            $sizeMB = $fileInfo.Length / 1MB
+            
+            if ($sizeMB -gt $MaxHeartbeatLogSizeMB) {
+                # Rotate log: rename current to .old, start fresh
+                $oldLogFile = "$HeartbeatLogFile.old"
+                if (Test-Path $oldLogFile) {
+                    Remove-Item -Path $oldLogFile -Force -ErrorAction SilentlyContinue
+                }
+                Move-Item -Path $HeartbeatLogFile -Destination $oldLogFile -Force -ErrorAction Stop
+            }
+        }
+        
+        # Parse payload for readable logging
+        $payloadObj = $Payload | ConvertFrom-Json
+        
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $logEntry = @"
+[$timestamp] Heartbeat Sent Successfully
+  Computer ID: $($payloadObj.computerId)
+  Computer Name: $($payloadObj.computerName)
+  Username: $($payloadObj.username)
+  Uptime: $($payloadObj.pcUptime)
+  Idle Time: $($payloadObj.idleTimeSeconds) seconds
+  Timestamp: $($payloadObj.timestamp)
+$(if ($Response) { "  API Response: $Response" })
+  Full Payload: $Payload
+---
+"@
+        
+        Add-Content -Path $HeartbeatLogFile -Value $logEntry -ErrorAction Stop
+    } catch {
+        # If we can't write to heartbeat log, log error but don't fail
+        Write-ErrorLog "Warning: Failed to write heartbeat log - $($_.Exception.Message)"
     }
 }
 
@@ -422,6 +473,11 @@ function Send-Heartbeat {
         }
         
         $response = Invoke-RestMethod -Uri $Config.ApiUrl -Method Post -Headers $headers -Body $Payload -ContentType "application/json" -ErrorAction Stop
+        
+        # Log successful heartbeat
+        $responseStr = if ($response) { ($response | ConvertTo-Json -Compress) } else { "OK" }
+        Write-HeartbeatLog -Payload $Payload -Response $responseStr
+        
         return $true
     } catch {
         Write-ErrorLog "API Error: Failed to send heartbeat - $($_.Exception.Message)"
@@ -462,6 +518,10 @@ function Process-Queue {
                 try {
                     $response = Invoke-RestMethod -Uri $Config.ApiUrl -Method Post -Headers $headers -Body $item -ContentType "application/json" -ErrorAction Stop
                     $processedCount++
+                    
+                    # Log successful queued heartbeat
+                    $responseStr = if ($response) { ($response | ConvertTo-Json -Compress) } else { "OK" }
+                    Write-HeartbeatLog -Payload $item -Response $responseStr
                 } catch {
                     Write-ErrorLog "Queue Error: Failed to send queued item - $($_.Exception.Message)"
                     $allSucceeded = $false
