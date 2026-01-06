@@ -99,10 +99,25 @@ public class IdleTimeHelper {
         lastInput.cbSize = (uint)Marshal.SizeOf(lastInput);
         
         if (GetLastInputInfo(ref lastInput)) {
-            uint lastInputTicks = lastInput.dwTime;
-            uint currentTicks = (uint)Environment.TickCount;
-            uint idleTicks = currentTicks - lastInputTicks;
-            return (int)(idleTicks / 1000);
+            // Use 64-bit TickCount64 to avoid wraparound issues
+            long currentTicks64 = Environment.TickCount64;
+            uint lastInputTicks32 = lastInput.dwTime;
+            
+            // Get the lower 32 bits of the 64-bit tick count
+            uint currentTicks32 = (uint)(currentTicks64 & 0xFFFFFFFF);
+            
+            // Calculate idle time, handling 32-bit wraparound
+            long idleMs;
+            if (currentTicks32 >= lastInputTicks32) {
+                // No wraparound - simple subtraction
+                idleMs = currentTicks32 - lastInputTicks32;
+            } else {
+                // Wraparound occurred - add the wraparound amount
+                idleMs = ((long)0x100000000L + currentTicks32) - lastInputTicks32;
+            }
+            
+            // Convert milliseconds to seconds
+            return (int)(idleMs / 1000);
         }
         
         return 0;
