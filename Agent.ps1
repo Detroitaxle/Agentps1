@@ -179,6 +179,9 @@ public class IdleTimeHelper {
     [DllImport("wtsapi32.dll")]
     static extern void WTSFreeMemory(IntPtr pMemory);
     
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    static extern bool WTSQueryUserToken(uint SessionId, out IntPtr phToken);
+    
     [DllImport("advapi32.dll", SetLastError = true)]
     static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
     
