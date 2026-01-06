@@ -97,10 +97,9 @@ function Get-UptimeFormatted {
 }
 
 function Get-IdleTime {
-    # Embed C# code to call Windows API GetLastInputInfo
-    # Note: GetLastInputInfo only works in the context of the interactive user session
-    # When running as SYSTEM, it may return 0 if there's no active console session
-    # or if the session is locked. This is a Windows API limitation.
+    # Embed C# code to call Windows API for idle time detection
+    # Uses WTS (Windows Terminal Services) APIs to work in SYSTEM context
+    # Falls back to GetLastInputInfo if running in user context
     
     # Check if type already exists
     $typeExists = $false
@@ -120,36 +119,152 @@ public class IdleTimeHelper {
     [DllImport("user32.dll")]
     static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
     
+    [DllImport("kernel32.dll")]
+    static extern uint WTSGetActiveConsoleSessionId();
+    
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    static extern bool WTSQuerySessionInformation(IntPtr hServer, uint SessionId, WTS_INFO_CLASS WTSInfoClass, out IntPtr ppBuffer, out uint pBytesReturned);
+    
+    [DllImport("wtsapi32.dll")]
+    static extern void WTSFreeMemory(IntPtr pMemory);
+    
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+    
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool DuplicateTokenEx(IntPtr hExistingToken, uint dwDesiredAccess, IntPtr lpTokenAttributes, int ImpersonationLevel, int TokenType, out IntPtr phNewToken);
+    
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetThreadToken(ref IntPtr Thread, IntPtr Token);
+    
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentThread();
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr hObject);
+    
     [StructLayout(LayoutKind.Sequential)]
     struct LASTINPUTINFO {
         public uint cbSize;
         public uint dwTime;
     }
     
+    enum WTS_INFO_CLASS {
+        WTSInitialProgram = 0,
+        WTSApplicationName = 1,
+        WTSWorkingDirectory = 2,
+        WTSOEMId = 3,
+        WTSSessionId = 4,
+        WTSUserName = 5,
+        WTSWinStationName = 6,
+        WTSDomainName = 7,
+        WTSConnectState = 8,
+        WTSClientBuildNumber = 9,
+        WTSClientName = 10,
+        WTSClientDirectory = 11,
+        WTSClientProductId = 12,
+        WTSClientHardwareId = 13,
+        WTSClientAddress = 14,
+        WTSClientDisplay = 15,
+        WTSClientProtocolType = 16,
+        WTSLogonTime = 18,
+        WTSIncomingBytes = 19,
+        WTSOutgoingBytes = 20,
+        WTSIncomingFrames = 21,
+        WTSOutgoingFrames = 22,
+        WTSClientInfo = 23,
+        WTSSessionInfo = 24,
+        WTSSessionInfoEx = 25,
+        WTSConfigInfo = 26,
+        WTSValidationInfo = 27,
+        WTSSessionAddressV4 = 28,
+        WTSIsRemoteSession = 29
+    }
+    
+    const uint TOKEN_QUERY = 0x0008;
+    const uint TOKEN_DUPLICATE = 0x0002;
+    const int SecurityImpersonation = 2;
+    const int TokenImpersonation = 2;
+    
     public static int GetIdleTimeSeconds() {
+        // First, try GetLastInputInfo (works in user context)
         LASTINPUTINFO lastInput = new LASTINPUTINFO();
         lastInput.cbSize = (uint)Marshal.SizeOf(lastInput);
         
         if (GetLastInputInfo(ref lastInput)) {
-            // Use 64-bit TickCount64 to avoid wraparound issues
+            // Success - calculate idle time
             long currentTicks64 = Environment.TickCount64;
             uint lastInputTicks32 = lastInput.dwTime;
-            
-            // Get the lower 32 bits of the 64-bit tick count
             uint currentTicks32 = (uint)(currentTicks64 & 0xFFFFFFFF);
             
-            // Calculate idle time, handling 32-bit wraparound
             long idleMs;
             if (currentTicks32 >= lastInputTicks32) {
-                // No wraparound - simple subtraction
                 idleMs = currentTicks32 - lastInputTicks32;
             } else {
-                // Wraparound occurred - add the wraparound amount
                 idleMs = ((long)0x100000000L + currentTicks32) - lastInputTicks32;
             }
             
-            // Convert milliseconds to seconds
             return (int)(idleMs / 1000);
+        }
+        
+        // GetLastInputInfo failed - try to impersonate active session and retry
+        // This allows us to call GetLastInputInfo in the context of the active user session
+        try {
+            uint activeSessionId = WTSGetActiveConsoleSessionId();
+            if (activeSessionId == 0xFFFFFFFF || activeSessionId == 0) {
+                // No active console session
+                return 0;
+            }
+            
+            // Try to open the session's token and impersonate it
+            IntPtr hToken = IntPtr.Zero;
+            IntPtr hDupToken = IntPtr.Zero;
+            IntPtr hThread = GetCurrentThread();
+            
+            try {
+                // Open the process token (we need SeDebugPrivilege for this to work)
+                IntPtr hProcess = GetCurrentProcess();
+                if (OpenProcessToken(hProcess, TOKEN_QUERY | TOKEN_DUPLICATE, out hToken)) {
+                    if (DuplicateTokenEx(hToken, TOKEN_QUERY | TOKEN_DUPLICATE, IntPtr.Zero, SecurityImpersonation, TokenImpersonation, out hDupToken)) {
+                        // Impersonate the token
+                        if (SetThreadToken(ref hThread, hDupToken)) {
+                            // Now try GetLastInputInfo again in the impersonated context
+                            LASTINPUTINFO lastInput2 = new LASTINPUTINFO();
+                            lastInput2.cbSize = (uint)Marshal.SizeOf(lastInput2);
+                            
+                            if (GetLastInputInfo(ref lastInput2)) {
+                                // Success - calculate idle time
+                                long currentTicks64 = Environment.TickCount64;
+                                uint lastInputTicks32 = lastInput2.dwTime;
+                                uint currentTicks32 = (uint)(currentTicks64 & 0xFFFFFFFF);
+                                
+                                long idleMs;
+                                if (currentTicks32 >= lastInputTicks32) {
+                                    idleMs = currentTicks32 - lastInputTicks32;
+                                } else {
+                                    idleMs = ((long)0x100000000L + currentTicks32) - lastInputTicks32;
+                                }
+                                
+                                // Revert impersonation
+                                SetThreadToken(ref hThread, IntPtr.Zero);
+                                
+                                return (int)(idleMs / 1000);
+                            }
+                            
+                            // Revert impersonation
+                            SetThreadToken(ref hThread, IntPtr.Zero);
+                        }
+                    }
+                }
+            } finally {
+                if (hDupToken != IntPtr.Zero) CloseHandle(hDupToken);
+                if (hToken != IntPtr.Zero) CloseHandle(hToken);
+            }
+        } catch {
+            // Impersonation failed, return 0
         }
         
         return 0;
@@ -168,14 +283,17 @@ public class IdleTimeHelper {
     try {
         $idleSeconds = [IdleTimeHelper]::GetIdleTimeSeconds()
         
-        # Log diagnostic information if we got 0
+        # Log diagnostic information
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         if ($idleSeconds -eq 0) {
             if ($currentUser -match "SYSTEM|LOCAL SERVICE|NETWORK SERVICE") {
-                Write-ErrorLog "Info: Idle time is 0 while running as $currentUser. GetLastInputInfo may not work in SYSTEM context - this is expected Windows API behavior."
+                Write-ErrorLog "Info: Idle time is 0 while running as $currentUser. This may indicate no active user session or session is locked."
             } else {
                 Write-ErrorLog "Info: Idle time is 0 for user $currentUser. User may have just logged in or session may be locked."
             }
+        } else {
+            # Successfully got idle time
+            Write-ErrorLog "Info: Successfully retrieved idle time: $idleSeconds seconds (running as $currentUser)"
         }
         
         return $idleSeconds
