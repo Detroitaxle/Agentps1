@@ -64,8 +64,26 @@ function Get-ComputerUUID {
 
 function Get-UptimeFormatted {
     try {
-        $ticks = [Environment]::TickCount64
-        $uptime = [TimeSpan]::FromMilliseconds($ticks)
+        # Use WMI LastBootUpTime for reliable uptime calculation in SYSTEM context
+        # This works regardless of whether running as SYSTEM or user account
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $bootTime = $os.LastBootUpTime
+        
+        if (-not $bootTime) {
+            Write-ErrorLog "Warning: LastBootUpTime is null, falling back to TickCount64"
+            # Fallback to TickCount64 if WMI fails
+            $ticks = [Environment]::TickCount64
+            if ($ticks -le 0) {
+                Write-ErrorLog "Error: TickCount64 returned $ticks"
+                return "00:00:00"
+            }
+            $uptime = [TimeSpan]::FromMilliseconds($ticks)
+        } else {
+            # Calculate uptime from boot time
+            $now = Get-Date
+            $uptime = $now - $bootTime
+        }
+        
         # Format as dd:hh:mm:ss or hh:mm:ss if less than 24 hours
         if ($uptime.Days -gt 0) {
             return "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
@@ -73,14 +91,28 @@ function Get-UptimeFormatted {
             return $uptime.ToString("hh\:mm\:ss")
         }
     } catch {
-        Write-ErrorLog "Error: Failed to calculate uptime - $($_.Exception.Message)"
+        Write-ErrorLog "Error: Failed to calculate uptime - $($_.Exception.Message). StackTrace: $($_.ScriptStackTrace)"
         return "00:00:00"
     }
 }
 
 function Get-IdleTime {
     # Embed C# code to call Windows API GetLastInputInfo
-    $csharpCode = @"
+    # Note: GetLastInputInfo only works in the context of the interactive user session
+    # When running as SYSTEM, it may return 0 if there's no active console session
+    # or if the session is locked. This is a Windows API limitation.
+    
+    # Check if type already exists
+    $typeExists = $false
+    try {
+        $null = [IdleTimeHelper]::GetIdleTimeSeconds()
+        $typeExists = $true
+    } catch {
+        $typeExists = $false
+    }
+    
+    if (-not $typeExists) {
+        $csharpCode = @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -124,20 +156,32 @@ public class IdleTimeHelper {
     }
 }
 "@
-    
-    try {
-        Add-Type -TypeDefinition $csharpCode -ErrorAction SilentlyContinue
-        $idleSeconds = [IdleTimeHelper]::GetIdleTimeSeconds()
-        return $idleSeconds
-    } catch {
-        # If type already exists, just use it
+        
         try {
-            $idleSeconds = [IdleTimeHelper]::GetIdleTimeSeconds()
-            return $idleSeconds
+            Add-Type -TypeDefinition $csharpCode -ErrorAction Stop
         } catch {
-            Write-ErrorLog "Error: Failed to get idle time - $($_.Exception.Message)"
+            Write-ErrorLog "Error: Failed to compile IdleTimeHelper C# code - $($_.Exception.Message). This may prevent idle time detection."
             return 0
         }
+    }
+    
+    try {
+        $idleSeconds = [IdleTimeHelper]::GetIdleTimeSeconds()
+        
+        # Log diagnostic information if we got 0
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        if ($idleSeconds -eq 0) {
+            if ($currentUser -match "SYSTEM|LOCAL SERVICE|NETWORK SERVICE") {
+                Write-ErrorLog "Info: Idle time is 0 while running as $currentUser. GetLastInputInfo may not work in SYSTEM context - this is expected Windows API behavior."
+            } else {
+                Write-ErrorLog "Info: Idle time is 0 for user $currentUser. User may have just logged in or session may be locked."
+            }
+        }
+        
+        return $idleSeconds
+    } catch {
+        Write-ErrorLog "Error: Failed to get idle time - $($_.Exception.Message). StackTrace: $($_.ScriptStackTrace)"
+        return 0
     }
 }
 
