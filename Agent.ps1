@@ -191,17 +191,39 @@ public class IdleTimeHelper {
     [DllImport("advapi32.dll", SetLastError = true)]
     static extern bool SetThreadToken(ref IntPtr Thread, IntPtr Token);
     
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
+    
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool RevertToSelf();
+    
     [DllImport("kernel32.dll")]
     static extern IntPtr GetCurrentThread();
     
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool CloseHandle(IntPtr hObject);
     
+    [DllImport("kernel32.dll")]
+    static extern uint GetLastError();
+    
     [StructLayout(LayoutKind.Sequential)]
     struct LASTINPUTINFO {
         public uint cbSize;
         public uint dwTime;
     }
+    
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    static extern int RegOpenKeyEx(IntPtr hKey, string subKey, uint options, int samDesired, out IntPtr phkResult);
+    
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern int RegQueryValueEx(IntPtr hKey, string lpValueName, IntPtr lpReserved, out uint lpType, IntPtr lpData, ref uint lpcbData);
+    
+    [DllImport("advapi32.dll")]
+    static extern int RegCloseKey(IntPtr hKey);
+    
+    const int KEY_QUERY_VALUE = 0x0001;
+    const int KEY_READ = 0x20019;
+    static readonly IntPtr HKEY_USERS = new IntPtr(unchecked((int)0x80000003));
     
     enum WTS_INFO_CLASS {
         WTSInitialProgram = 0,
@@ -241,11 +263,31 @@ public class IdleTimeHelper {
     const int TokenImpersonation = 2;
     
     public static int GetIdleTimeSeconds() {
+        // #region agent log
+        try {
+            long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+            System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:243\",\"message\":\"Function entry\",\"data\":{\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+        } catch {}
+        // #endregion
+        
         // First, try GetLastInputInfo (works in user context)
         LASTINPUTINFO lastInput = new LASTINPUTINFO();
         lastInput.cbSize = (uint)Marshal.SizeOf(lastInput);
         
-        if (GetLastInputInfo(ref lastInput)) {
+        bool getLastInputResult = GetLastInputInfo(ref lastInput);
+        // #region agent log
+        try {
+            long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+            uint ct = (uint)Environment.TickCount;
+            System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:248\",\"message\":\"GetLastInputInfo first attempt\",\"data\":{\"success\":" + getLastInputResult.ToString().ToLower() + ",\"lastInputTicks\":" + lastInput.dwTime + ",\"currentTicks\":" + ct + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+        } catch {}
+        // #endregion
+        
+        // Check if GetLastInputInfo succeeded AND returned valid data (dwTime != 0)
+        // When running as SYSTEM, GetLastInputInfo may return TRUE but with dwTime=0 (invalid)
+        if (getLastInputResult && lastInput.dwTime != 0) {
             // Success - calculate idle time
             // Use TickCount (32-bit) and handle wraparound for compatibility with older .NET versions
             uint currentTicks = (uint)Environment.TickCount;
@@ -259,15 +301,47 @@ public class IdleTimeHelper {
                 idleMs = (uint.MaxValue - lastInputTicks32) + currentTicks + 1;
             }
             
-            return (int)(idleMs / 1000);
+            int result = (int)(idleMs / 1000);
+            // #region agent log
+            try {
+                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                    "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:262\",\"message\":\"Direct GetLastInputInfo success path\",\"data\":{\"currentTicks\":" + currentTicks + ",\"lastInputTicks32\":" + lastInputTicks32 + ",\"idleMs\":" + idleMs + ",\"resultSeconds\":" + result + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+            } catch {}
+            // #endregion
+            return result;
         }
+        
+        // #region agent log
+        try {
+            long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+            System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:267\",\"message\":\"GetLastInputInfo failed or returned invalid dwTime=0, trying impersonation\",\"data\":{\"getLastInputResult\":" + getLastInputResult.ToString().ToLower() + ",\"dwTime\":" + lastInput.dwTime + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+        } catch {}
+        // #endregion
         
         // GetLastInputInfo failed - try to impersonate active session and retry
         // This allows us to call GetLastInputInfo in the context of the active user session
         try {
             uint activeSessionId = WTSGetActiveConsoleSessionId();
+            // #region agent log
+            try {
+                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                bool invalid = (activeSessionId == 0xFFFFFFFF || activeSessionId == 0);
+                System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                    "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"B\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:268\",\"message\":\"WTSGetActiveConsoleSessionId result\",\"data\":{\"activeSessionId\":\"" + activeSessionId + "\",\"isInvalid\":" + invalid.ToString().ToLower() + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+            } catch {}
+            // #endregion
+            
             if (activeSessionId == 0xFFFFFFFF || activeSessionId == 0) {
                 // No active console session
+                // #region agent log
+                try {
+                    long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                    System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                        "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"B\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:271\",\"message\":\"No active console session - returning 0\",\"data\":{\"activeSessionId\":\"" + activeSessionId + "\",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                } catch {}
+                // #endregion
                 return 0;
             }
             
@@ -278,16 +352,57 @@ public class IdleTimeHelper {
             
             try {
                 // Get the user token for the active session
-                if (WTSQueryUserToken(activeSessionId, out hSessionToken)) {
+                bool wtsQueryResult = WTSQueryUserToken(activeSessionId, out hSessionToken);
+                // #region agent log
+                try {
+                    long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                    int lastErr = Marshal.GetLastWin32Error();
+                    System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                        "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"C\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:281\",\"message\":\"WTSQueryUserToken result\",\"data\":{\"success\":" + wtsQueryResult.ToString().ToLower() + ",\"sessionId\":\"" + activeSessionId + "\",\"tokenHandle\":\"" + hSessionToken.ToString() + "\",\"lastError\":" + lastErr + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                } catch {}
+                // #endregion
+                
+                if (wtsQueryResult) {
                     // Duplicate the token for impersonation
-                    if (DuplicateTokenEx(hSessionToken, TOKEN_QUERY | TOKEN_DUPLICATE, IntPtr.Zero, SecurityImpersonation, TokenImpersonation, out hDupToken)) {
-                        // Impersonate the token
-                        if (SetThreadToken(ref hThread, hDupToken)) {
+                    bool dupTokenResult = DuplicateTokenEx(hSessionToken, TOKEN_QUERY | TOKEN_DUPLICATE, IntPtr.Zero, SecurityImpersonation, TokenImpersonation, out hDupToken);
+                    // #region agent log
+                    try {
+                        long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                        int lastErr = Marshal.GetLastWin32Error();
+                        System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                            "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:283\",\"message\":\"DuplicateTokenEx result\",\"data\":{\"success\":" + dupTokenResult.ToString().ToLower() + ",\"dupTokenHandle\":\"" + hDupToken.ToString() + "\",\"lastError\":" + lastErr + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                    } catch {}
+                    // #endregion
+                    
+                    if (dupTokenResult) {
+                        // Try ImpersonateLoggedOnUser instead of SetThreadToken (more reliable for SYSTEM)
+                        bool impersonateResult = ImpersonateLoggedOnUser(hDupToken);
+                        // #region agent log
+                        try {
+                            long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                            int lastErr = Marshal.GetLastWin32Error();
+                            System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                                "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:285\",\"message\":\"ImpersonateLoggedOnUser result\",\"data\":{\"success\":" + impersonateResult.ToString().ToLower() + ",\"lastError\":" + lastErr + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                        } catch {}
+                        // #endregion
+                        
+                        if (impersonateResult) {
                             // Now try GetLastInputInfo again in the impersonated context
                             LASTINPUTINFO lastInput2 = new LASTINPUTINFO();
                             lastInput2.cbSize = (uint)Marshal.SizeOf(lastInput2);
                             
-                            if (GetLastInputInfo(ref lastInput2)) {
+                            bool getLastInput2Result = GetLastInputInfo(ref lastInput2);
+                            // #region agent log
+                            try {
+                                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                                uint ct2 = (uint)Environment.TickCount;
+                                System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                                    "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"E\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:290\",\"message\":\"GetLastInputInfo after impersonation\",\"data\":{\"success\":" + getLastInput2Result.ToString().ToLower() + ",\"lastInputTicks\":" + lastInput2.dwTime + ",\"currentTicks\":" + ct2 + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                            } catch {}
+                            // #endregion
+                            
+                            // Check if GetLastInputInfo succeeded AND returned valid data (dwTime != 0)
+                            if (getLastInput2Result && lastInput2.dwTime != 0) {
                                 // Success - calculate idle time
                                 // Use TickCount (32-bit) and handle wraparound
                                 uint currentTicks = (uint)Environment.TickCount;
@@ -302,13 +417,37 @@ public class IdleTimeHelper {
                                 }
                                 
                                 // Revert impersonation
-                                SetThreadToken(ref hThread, IntPtr.Zero);
+                                RevertToSelf();
                                 
-                                return (int)(idleMs / 1000);
+                                int result = (int)(idleMs / 1000);
+                                // #region agent log
+                                try {
+                                    long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                                    System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                                        "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"E\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:307\",\"message\":\"Impersonation path success\",\"data\":{\"currentTicks\":" + currentTicks + ",\"lastInputTicks32\":" + lastInputTicks32 + ",\"idleMs\":" + idleMs + ",\"resultSeconds\":" + result + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                                } catch {}
+                                // #endregion
+                                return result;
                             }
                             
                             // Revert impersonation
-                            SetThreadToken(ref hThread, IntPtr.Zero);
+                            RevertToSelf();
+                            // #region agent log
+                            try {
+                                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                                System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                                    "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"E\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:311\",\"message\":\"GetLastInputInfo failed after impersonation\",\"data\":{\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                            } catch {}
+                            // #endregion
+                        } else {
+                            // #region agent log
+                            try {
+                                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                                int lastErr = Marshal.GetLastWin32Error();
+                                System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                                    "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:313\",\"message\":\"ImpersonateLoggedOnUser failed\",\"data\":{\"lastError\":" + lastErr + ",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+                            } catch {}
+                            // #endregion
                         }
                     }
                 }
@@ -316,10 +455,26 @@ public class IdleTimeHelper {
                 if (hDupToken != IntPtr.Zero) CloseHandle(hDupToken);
                 if (hSessionToken != IntPtr.Zero) CloseHandle(hSessionToken);
             }
-        } catch {
+        } catch (Exception ex) {
             // Impersonation failed, return 0
+            // #region agent log
+            try {
+                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                string exMsg = ex.Message.Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "");
+                string exStack = ex.StackTrace != null ? ex.StackTrace.Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "") : "";
+                System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                    "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"G\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:319\",\"message\":\"Exception caught\",\"data\":{\"exceptionType\":\"" + ex.GetType().Name + "\",\"message\":\"" + exMsg + "\",\"stackTrace\":\"" + exStack + "\",\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+            } catch {}
+            // #endregion
         }
         
+        // #region agent log
+        try {
+            long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+            System.IO.File.AppendAllText(@"c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log", 
+                "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"IdleTimeHelper.GetIdleTimeSeconds:323\",\"message\":\"Returning 0 - all paths failed\",\"data\":{\"timestamp\":" + ts + "},\"timestamp\":" + ts + "}\n");
+        } catch {}
+        // #endregion
         return 0;
     }
 }
@@ -334,10 +489,49 @@ public class IdleTimeHelper {
     }
     
     try {
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        # #region agent log
+        try {
+            $logData = @{
+                sessionId = "debug-session"
+                runId = "run1"
+                hypothesisId = "A"
+                location = "Get-IdleTime:340"
+                message = "Calling GetIdleTimeSeconds"
+                data = @{
+                    currentUser = $currentUser
+                    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                }
+                timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            }
+            $logJson = $logData | ConvertTo-Json -Compress
+            Add-Content -Path "c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log" -Value $logJson -ErrorAction SilentlyContinue
+        } catch {}
+        # #endregion
+        
         $idleSeconds = [IdleTimeHelper]::GetIdleTimeSeconds()
         
+        # #region agent log
+        try {
+            $logData = @{
+                sessionId = "debug-session"
+                runId = "run1"
+                hypothesisId = "A"
+                location = "Get-IdleTime:355"
+                message = "GetIdleTimeSeconds returned"
+                data = @{
+                    idleSeconds = $idleSeconds
+                    currentUser = $currentUser
+                    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                }
+                timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            }
+            $logJson = $logData | ConvertTo-Json -Compress
+            Add-Content -Path "c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log" -Value $logJson -ErrorAction SilentlyContinue
+        } catch {}
+        # #endregion
+        
         # Log diagnostic information
-        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
         if ($idleSeconds -eq 0) {
             if ($currentUser -match "SYSTEM|LOCAL SERVICE|NETWORK SERVICE") {
                 Write-ErrorLog "Info: Idle time is 0 while running as $currentUser. This may indicate no active user session or session is locked."
@@ -351,6 +545,25 @@ public class IdleTimeHelper {
         
         return $idleSeconds
     } catch {
+        # #region agent log
+        try {
+            $logData = @{
+                sessionId = "debug-session"
+                runId = "run1"
+                hypothesisId = "G"
+                location = "Get-IdleTime:378"
+                message = "Exception in Get-IdleTime"
+                data = @{
+                    exceptionMessage = $_.Exception.Message
+                    stackTrace = $_.ScriptStackTrace
+                    timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                }
+                timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            }
+            $logJson = $logData | ConvertTo-Json -Compress
+            Add-Content -Path "c:\Users\samsa\OneDrive\Desktop\idlewinapi2\.cursor\debug.log" -Value $logJson -ErrorAction SilentlyContinue
+        } catch {}
+        # #endregion
         Write-ErrorLog "Error: Failed to get idle time - $($_.Exception.Message). StackTrace: $($_.ScriptStackTrace)"
         return 0
     }

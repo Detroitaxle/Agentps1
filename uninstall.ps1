@@ -46,11 +46,21 @@ try {
     $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existingTask) {
         Write-Host "Stopping scheduled task: $TaskName" -ForegroundColor Yellow
-        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        try {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Write-Host "Task stopped successfully" -ForegroundColor Green
+        } catch {
+            Write-Host "Warning: Could not stop task (may already be stopped): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
         
         Write-Host "Removing scheduled task: $TaskName" -ForegroundColor Yellow
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-        Write-Host "Scheduled task removed successfully" -ForegroundColor Green
+        try {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            Write-Host "Scheduled task removed successfully" -ForegroundColor Green
+        } catch {
+            Write-Host "Error: Failed to remove scheduled task: $($_.Exception.Message)" -ForegroundColor Red
+            throw
+        }
     } else {
         Write-Host "Scheduled task not found: $TaskName" -ForegroundColor Gray
     }
@@ -76,20 +86,33 @@ try {
     Write-Host "Checking for script file..." -ForegroundColor Yellow
     if (Test-Path $ScriptPath) {
         Write-Host "Removing script file: $ScriptPath" -ForegroundColor Yellow
-        Remove-Item -Path $ScriptPath -Force -ErrorAction Stop
-        Write-Host "Script file removed successfully" -ForegroundColor Green
-        
-        # Remove script directory if empty
-        $scriptDir = Split-Path -Path $ScriptPath -Parent
         try {
-            $items = Get-ChildItem -Path $scriptDir -ErrorAction Stop
-            if ($items.Count -eq 0) {
-                Write-Host "Removing empty script directory: $scriptDir" -ForegroundColor Yellow
-                Remove-Item -Path $scriptDir -Force -ErrorAction Stop
-                Write-Host "Script directory removed successfully" -ForegroundColor Green
+            # Check if file is in use (read-only or locked)
+            $fileInfo = Get-Item -Path $ScriptPath -ErrorAction Stop
+            if ($fileInfo.IsReadOnly) {
+                $fileInfo.IsReadOnly = $false
+            }
+            Remove-Item -Path $ScriptPath -Force -ErrorAction Stop
+            Write-Host "Script file removed successfully" -ForegroundColor Green
+            
+            # Remove script directory if empty
+            $scriptDir = Split-Path -Path $ScriptPath -Parent
+            try {
+                $items = Get-ChildItem -Path $scriptDir -Force -ErrorAction Stop | Where-Object { $_.Name -ne '.' -and $_.Name -ne '..' }
+                if ($items.Count -eq 0) {
+                    Write-Host "Removing empty script directory: $scriptDir" -ForegroundColor Yellow
+                    Remove-Item -Path $scriptDir -Force -ErrorAction Stop
+                    Write-Host "Script directory removed successfully" -ForegroundColor Green
+                } else {
+                    Write-Host "Script directory not empty, keeping: $scriptDir" -ForegroundColor Gray
+                }
+            } catch {
+                # Directory might not be empty or already removed, ignore
+                Write-Host "Note: Could not remove script directory (may not be empty): $($_.Exception.Message)" -ForegroundColor Gray
             }
         } catch {
-            # Directory might not be empty or already removed, ignore
+            Write-Host "Warning: Could not remove script file (may be in use): $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "You may need to manually delete: $ScriptPath" -ForegroundColor Yellow
         }
     } else {
         Write-Host "Script file not found: $ScriptPath" -ForegroundColor Gray

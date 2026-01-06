@@ -155,7 +155,14 @@ try {
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
     
     # Create scheduled task principal (run as SYSTEM)
-    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    # Create scheduled task principal (run as logged-in user to allow GetLastInputInfo to work)
+    # Get the current logged-in user (works even when running as admin)
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    # Extract username if domain format (DOMAIN\username -> username)
+    if ($currentUser -match '\\') {
+        $currentUser = $currentUser.Split('\')[-1]
+    }
+    $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
     
     # Create scheduled task settings
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false
