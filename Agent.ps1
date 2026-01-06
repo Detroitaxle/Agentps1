@@ -193,15 +193,16 @@ public class IdleTimeHelper {
         
         if (GetLastInputInfo(ref lastInput)) {
             // Success - calculate idle time
-            long currentTicks64 = Environment.TickCount64;
+            // Use TickCount (32-bit) and handle wraparound for compatibility with older .NET versions
+            uint currentTicks = (uint)Environment.TickCount;
             uint lastInputTicks32 = lastInput.dwTime;
-            uint currentTicks32 = (uint)(currentTicks64 & 0xFFFFFFFF);
             
-            long idleMs;
-            if (currentTicks32 >= lastInputTicks32) {
-                idleMs = currentTicks32 - lastInputTicks32;
+            uint idleMs;
+            if (currentTicks >= lastInputTicks32) {
+                idleMs = currentTicks - lastInputTicks32;
             } else {
-                idleMs = ((long)0x100000000L + currentTicks32) - lastInputTicks32;
+                // Handle wraparound (occurs every ~49.7 days)
+                idleMs = (uint.MaxValue - lastInputTicks32) + currentTicks + 1;
             }
             
             return (int)(idleMs / 1000);
@@ -234,15 +235,16 @@ public class IdleTimeHelper {
                             
                             if (GetLastInputInfo(ref lastInput2)) {
                                 // Success - calculate idle time
-                                long currentTicks64 = Environment.TickCount64;
+                                // Use TickCount (32-bit) and handle wraparound
+                                uint currentTicks = (uint)Environment.TickCount;
                                 uint lastInputTicks32 = lastInput2.dwTime;
-                                uint currentTicks32 = (uint)(currentTicks64 & 0xFFFFFFFF);
                                 
-                                long idleMs;
-                                if (currentTicks32 >= lastInputTicks32) {
-                                    idleMs = currentTicks32 - lastInputTicks32;
+                                uint idleMs;
+                                if (currentTicks >= lastInputTicks32) {
+                                    idleMs = currentTicks - lastInputTicks32;
                                 } else {
-                                    idleMs = ((long)0x100000000L + currentTicks32) - lastInputTicks32;
+                                    // Handle wraparound (occurs every ~49.7 days)
+                                    idleMs = (uint.MaxValue - lastInputTicks32) + currentTicks + 1;
                                 }
                                 
                                 // Revert impersonation
