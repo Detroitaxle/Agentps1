@@ -1,5 +1,4 @@
-# Check Agent Status Script
-# Shows current agent status, last send time, queue status, and recent errors
+# Shows agent status and recent activity
 
 Write-Host "=== Agent Status Check ===" -ForegroundColor Cyan
 Write-Host ""
@@ -20,7 +19,7 @@ try {
 }
 Write-Host ""
 
-# Check Registry Configuration
+# check config
 Write-Host "Registry Configuration:" -ForegroundColor Yellow
 try {
     $apiUrl = (Get-ItemProperty -Path "HKLM:\SOFTWARE\MyMonitoringAgent" -Name "ApiUrl" -ErrorAction Stop).ApiUrl
@@ -47,7 +46,7 @@ if (Test-Path $DataDirectory) {
 }
 Write-Host ""
 
-# Check Last Send Time
+# when did we last send?
 Write-Host "Last Send Status:" -ForegroundColor Yellow
 if (Test-Path $LastSendFile) {
     try {
@@ -73,7 +72,7 @@ if (Test-Path $LastSendFile) {
 }
 Write-Host ""
 
-# Check Queue Status
+# check queue
 Write-Host "Queue Status:" -ForegroundColor Yellow
 if (Test-Path $QueueFile) {
     try {
@@ -97,7 +96,7 @@ if (Test-Path $QueueFile) {
 }
 Write-Host ""
 
-# Check Error Log
+# recent errors
 Write-Host "Recent Errors (last 10 lines):" -ForegroundColor Yellow
 if (Test-Path $ErrorLogFile) {
     try {
@@ -117,7 +116,7 @@ if (Test-Path $ErrorLogFile) {
 }
 Write-Host ""
 
-# Check Current System State
+# current state
 Write-Host "Current System State:" -ForegroundColor Yellow
 try {
     # Get idle time
@@ -140,20 +139,20 @@ public class IdleTimeHelper {
             long currentTicks64 = Environment.TickCount64;
             uint lastInputTicks32 = lastInput.dwTime;
             
-            // Get the lower 32 bits of the 64-bit tick count
+            // get lower 32 bits
             uint currentTicks32 = (uint)(currentTicks64 & 0xFFFFFFFF);
             
-            // Calculate idle time, handling 32-bit wraparound
+            // calculate idle time, handle wraparound
             long idleMs;
             if (currentTicks32 >= lastInputTicks32) {
-                // No wraparound - simple subtraction
+                // simple case
                 idleMs = currentTicks32 - lastInputTicks32;
             } else {
-                // Wraparound occurred - add the wraparound amount
+                // wraparound happened
                 idleMs = ((long)0x100000000L + currentTicks32) - lastInputTicks32;
             }
             
-            // Convert milliseconds to seconds
+            // convert to seconds
             return (int)(idleMs / 1000);
         }
         return 0;
@@ -185,7 +184,7 @@ public class IdleTimeHelper {
     Write-Host "  Uptime: $uptimeFormatted" -ForegroundColor Gray
     Write-Host "  Idle Time: $idleSeconds seconds ($([Math]::Floor($idleSeconds / 60)) minutes)" -ForegroundColor $(if ($idleSeconds -gt 600) { "Yellow" } else { "Green" })
     
-    # Check if adaptive polling would skip
+    # check if adaptive polling is active
     if (Test-Path $LastSendFile) {
         try {
             $content = Get-Content $LastSendFile -Raw

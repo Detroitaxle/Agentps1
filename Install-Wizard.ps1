@@ -1,26 +1,20 @@
 #Requires -Version 5.1
 #Requires -RunAsAdministrator
-<#
-.SYNOPSIS
-    GUI Installation Wizard for PC Monitoring Agent
-.DESCRIPTION
-    Provides a Windows Forms-based GUI for configuring and installing the monitoring agent.
-    Requires Administrator privileges to create registry keys and scheduled tasks.
-#>
+# GUI installer with Windows Forms
 
-# Error handling wrapper
+# handle errors properly
 $ErrorActionPreference = "Stop"
 
-# Try to load Windows Forms early for error messages
+# load Windows Forms early for errors
 try {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
     Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
 } catch {
-    # If we can't load Forms, we'll use Write-Host for errors
+    # fall back to console if Forms won't load
 }
 
 try {
-    # Check for administrator privileges
+    # make sure we're running as admin
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     
@@ -43,7 +37,7 @@ try {
         exit 1
     }
     
-    # Load required assemblies (now that we know we're admin)
+    # load Forms now that we're admin
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
 } catch {
@@ -103,7 +97,7 @@ function Test-ApiConnection {
             "X-API-KEY" = $ApiKey
         }
         
-        # Create a minimal test payload similar to what Agent.ps1 sends
+        # send a test payload
         $testPayload = @{
             computerId = "test-connection"
             computerName = "TEST"
@@ -115,26 +109,25 @@ function Test-ApiConnection {
             timestamp = (Get-Date).ToUniversalTime().ToString("o")
         } | ConvertTo-Json -Compress
         
-        # Use Invoke-RestMethod like Agent.ps1 does
+        # call the API
         try {
             $response = Invoke-RestMethod -Uri $ApiUrl -Method Post -Headers $headers -Body $testPayload -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
             $responseJson = if ($response) { $response | ConvertTo-Json -Compress } else { "OK" }
             return @{ Success = $true; Message = "Connection successful - API responded with: $responseJson" }
         } catch {
-            # Check if we got an HTTP response (meaning the server is reachable)
+            # check if server is reachable
             $httpException = $_.Exception
             if ($httpException.Response) {
                 try {
                     $statusCode = $httpException.Response.StatusCode.value__
-                    # 400 Bad Request might mean the endpoint exists but payload is wrong (which is OK for testing)
-                    # 401/403 means auth issue, but endpoint exists
+                    # 400/401/403 means endpoint exists
                     if ($statusCode -in @(400, 401, 403)) {
                         return @{ Success = $true; Message = "Server responded (Status $statusCode) - endpoint is reachable" }
                     }
-                    # Other 4xx/5xx means server responded
+                    # any other status
                     return @{ Success = $false; Message = "Server responded with HTTP $statusCode - check API endpoint and key" }
                 } catch {
-                    # StatusCode access failed, but we have a Response, so server is reachable
+                    # can't get status code but server responded
                     return @{ Success = $true; Message = "Server responded (endpoint is reachable)" }
                 }
             }
@@ -157,25 +150,25 @@ function Install-Agent {
     $DataDirectory = "C:\ProgramData\MyAgent"
     
     try {
-        # Create registry keys
+        # set up registry
         if (-not (Test-Path $RegistryPath)) {
             $null = New-Item -Path $RegistryPath -Force
         }
         Set-ItemProperty -Path $RegistryPath -Name "ApiUrl" -Value $ApiUrl -Type String
         Set-ItemProperty -Path $RegistryPath -Name "ApiKey" -Value $ApiKey -Type String
         
-        # Create data directory
+        # create data folder
         if (-not (Test-Path $DataDirectory)) {
             $null = New-Item -ItemType Directory -Path $DataDirectory -Force
         }
         
-        # Ensure script directory exists and copy script if needed
+        # make sure script location exists
         $scriptDir = Split-Path -Path $ScriptPath -Parent
         if (-not (Test-Path $scriptDir)) {
             $null = New-Item -ItemType Directory -Path $scriptDir -Force
         }
         
-        # Copy Agent.ps1 to target location if it's different from current location
+        # copy Agent.ps1 if needed
         $currentScript = if ($PSScriptRoot) {
             Join-Path $PSScriptRoot "Agent.ps1"
         } else {
@@ -197,34 +190,33 @@ function Install-Agent {
             throw "Agent.ps1 not found in script directory and target path does not exist"
         }
         
-        # Remove existing task if it exists
+        # clear old task
         $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         if ($existingTask) {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
         
-        # Create scheduled task action
+        # create task
         $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
         
-        # Create scheduled task trigger (every 1 minute)
+        # every minute
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
         
-        # Create scheduled task principal (run as logged-in user to allow GetLastInputInfo to work)
-        # Get the current logged-in user (works even when running as admin)
+        # run as current user
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        # Extract username if domain format (DOMAIN\username -> username)
+        # strip domain
         if ($currentUser -match '\\') {
             $currentUser = $currentUser.Split('\')[-1]
         }
         $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
         
-        # Create scheduled task settings with Hidden flag to prevent window flashing
+        # keep task hidden
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false -Hidden
         
-        # Register the scheduled task
+        # register the task
         $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "PC Monitoring Agent - Sends heartbeat data to monitoring API"
         
-        # Start the task immediately
+        # start it
         Start-ScheduledTask -TaskName $TaskName
         
         return @{ Success = $true; Message = "Installation completed successfully!" }
@@ -313,7 +305,7 @@ $btnTestConnection.Add_Click({
     $lblStatus.ForeColor = [System.Drawing.Color]::Blue
     $form.Refresh()
     
-    # Validate inputs
+    # check inputs
     if ([string]::IsNullOrWhiteSpace($txtApiUrl.Text)) {
         [System.Windows.Forms.MessageBox]::Show("Please enter an API URL.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
         $lblStatus.Text = ""
@@ -332,7 +324,7 @@ $btnTestConnection.Add_Click({
         return
     }
     
-    # Test connection
+    # test it
     $result = Test-ApiConnection -ApiUrl $txtApiUrl.Text -ApiKey $txtApiKey.Text
     $script:connectionTested = $true
     $script:testResult = $result
@@ -356,7 +348,7 @@ $btnInstall.Size = New-Object System.Drawing.Size(130, 30)
 $btnInstall.Text = "Install"
 $btnInstall.TabIndex = 5
 $btnInstall.Add_Click({
-    # Validate inputs
+    # check inputs
     if ([string]::IsNullOrWhiteSpace($txtApiUrl.Text)) {
         [System.Windows.Forms.MessageBox]::Show("Please enter an API URL.", "Validation Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
         return
@@ -377,7 +369,7 @@ $btnInstall.Add_Click({
         return
     }
     
-    # Check if script exists (or will be copied)
+    # make sure Agent.ps1 exists
     $currentScript = if ($PSScriptRoot) {
         Join-Path $PSScriptRoot "Agent.ps1"
     } else {
@@ -388,7 +380,7 @@ $btnInstall.Add_Click({
         return
     }
     
-    # Warn if connection not tested
+    # warn if not tested
     if (-not $script:connectionTested) {
         $result = [System.Windows.Forms.MessageBox]::Show("You have not tested the connection. Do you want to continue with installation anyway?", "Confirm Installation", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
         if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
@@ -401,7 +393,7 @@ $btnInstall.Add_Click({
         }
     }
     
-    # Disable buttons during installation
+    # disable buttons while installing
     $btnInstall.Enabled = $false
     $btnTestConnection.Enabled = $false
     $btnBrowse.Enabled = $false
@@ -410,7 +402,7 @@ $btnInstall.Add_Click({
     $lblStatus.ForeColor = [System.Drawing.Color]::Blue
     $form.Refresh()
     
-    # Perform installation
+    # do the install
     $installResult = Install-Agent -ApiUrl $txtApiUrl.Text -ApiKey $txtApiKey.Text -ScriptPath $txtScriptPath.Text
     
     if ($installResult.Success) {
@@ -445,7 +437,7 @@ $form.Controls.Add($btnCancel)
 #region Main Execution
 
 try {
-    # Show the form
+    # show the form
     [System.Windows.Forms.Application]::Run($form)
 } catch {
     $errorMsg = "An error occurred while running the wizard: $($_.Exception.Message)"

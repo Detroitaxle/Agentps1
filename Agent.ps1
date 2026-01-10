@@ -1,11 +1,5 @@
 #Requires -Version 5.1
-<#
-.SYNOPSIS
-    Background monitoring agent that sends heartbeat data to a remote API.
-.DESCRIPTION
-    Runs every minute via Task Scheduler as SYSTEM account. Implements adaptive
-    polling, offline queuing, and efficient resource usage.
-#>
+# Monitoring agent - sends heartbeat data every minute
 
 #region Configuration
 $RegistryPath = "HKLM:\SOFTWARE\MyMonitoringAgent"
@@ -15,10 +9,10 @@ $ErrorLogFile = Join-Path $DataDirectory "error.log"
 $HeartbeatLogFile = Join-Path $DataDirectory "heartbeat.log"
 $LastSendFile = Join-Path $DataDirectory "last_send.txt"
 $MaxQueueSizeMB = 10
-$MaxHeartbeatLogSizeMB = 10  # Maximum size for heartbeat log before rotation
+$MaxHeartbeatLogSizeMB = 10  # log rotates when it hits this size
 $BatchSize = 50
-$AdaptivePollingThreshold = 600  # seconds (10 minutes)
-$AdaptivePollingInterval = 300   # seconds (5 minutes)
+$AdaptivePollingThreshold = 600  # 10 minutes
+$AdaptivePollingInterval = 300   # 5 minutes
 #endregion
 
 #region Helper Functions
@@ -30,7 +24,7 @@ function Write-ErrorLog {
     try {
         Add-Content -Path $ErrorLogFile -Value $LogMessage -ErrorAction Stop
     } catch {
-        # If we can't write to error log, there's not much we can do
+        # can't write the log? nothing we can do
     }
 }
 
@@ -41,16 +35,16 @@ function Write-HeartbeatLog {
     )
     
     try {
-        # Ensure directory exists
+        # make sure directory exists
         $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
         
-        # Check log file size and rotate if needed
+        # rotate log if it's too big
         if (Test-Path $HeartbeatLogFile) {
             $fileInfo = Get-Item $HeartbeatLogFile
             $sizeMB = $fileInfo.Length / 1MB
             
             if ($sizeMB -gt $MaxHeartbeatLogSizeMB) {
-                # Rotate log: rename current to .old, start fresh
+                # rename current log to .old
                 $oldLogFile = "$HeartbeatLogFile.old"
                 if (Test-Path $oldLogFile) {
                     Remove-Item -Path $oldLogFile -Force -ErrorAction SilentlyContinue
@@ -59,7 +53,7 @@ function Write-HeartbeatLog {
             }
         }
         
-        # Parse payload for readable logging
+        # parse payload so we can log it nicely
         $payloadObj = $Payload | ConvertFrom-Json
         
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -78,7 +72,7 @@ $(if ($Response) { "  API Response: $Response" })
         
         Add-Content -Path $HeartbeatLogFile -Value $logEntry -ErrorAction Stop
     } catch {
-        # If we can't write to heartbeat log, log error but don't fail
+        # failed to write heartbeat log - not critical
         Write-ErrorLog "Warning: Failed to write heartbeat log - $($_.Exception.Message)"
     }
 }
@@ -115,14 +109,13 @@ function Get-ComputerUUID {
 
 function Get-UptimeFormatted {
     try {
-        # Use WMI LastBootUpTime for reliable uptime calculation in SYSTEM context
-        # This works regardless of whether running as SYSTEM or user account
+        # get boot time from WMI - works in any context
         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
         $bootTime = $os.LastBootUpTime
         
         if (-not $bootTime) {
             Write-ErrorLog "Warning: LastBootUpTime is null, falling back to TickCount64"
-            # Fallback to TickCount64 if WMI fails
+            # fallback if WMI doesn't work
             $ticks = [Environment]::TickCount64
             if ($ticks -le 0) {
                 Write-ErrorLog "Error: TickCount64 returned $ticks"
@@ -130,12 +123,12 @@ function Get-UptimeFormatted {
             }
             $uptime = [TimeSpan]::FromMilliseconds($ticks)
         } else {
-            # Calculate uptime from boot time
+            # normal path - calculate from boot time
             $now = Get-Date
             $uptime = $now - $bootTime
         }
         
-        # Format as dd:hh:mm:ss or hh:mm:ss if less than 24 hours
+        # format uptime nicely
         if ($uptime.Days -gt 0) {
             return "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
         } else {
@@ -148,11 +141,10 @@ function Get-UptimeFormatted {
 }
 
 function Get-IdleTime {
-    # Embed C# code to call Windows API for idle time detection
-    # Uses WTS (Windows Terminal Services) APIs to work in SYSTEM context
-    # Falls back to GetLastInputInfo if running in user context
+    # call Windows API to get idle time
+    # works in both SYSTEM and user contexts
     
-    # Check if type already exists
+    # check if we already loaded this
     $typeExists = $false
     try {
         $null = [IdleTimeHelper]::GetIdleTimeSeconds()
@@ -575,7 +567,7 @@ function Get-CurrentUsername {
         if (-not $username) {
             $username = if ($env:USERNAME) { $env:USERNAME } else { "SYSTEM" }
         }
-        # Extract just the username if it's in DOMAIN\USER format
+        # strip domain if present
         if ($username -match '\\') {
             $username = $username.Split('\')[-1]
         }
@@ -592,12 +584,12 @@ function Get-LastSendTime {
             if ($content) {
                 $trimmed = $content.Trim()
                 if ($trimmed) {
-                    # Try parsing as ISO 8601 format (what we write with .ToString("o"))
+                    # parse the timestamp
                     try {
                         $timestamp = [DateTime]::Parse($trimmed, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
                         return $timestamp
                     } catch {
-                        # Fallback to standard parse
+                        # try basic parsing
                         $timestamp = [DateTime]::Parse($trimmed)
                         return $timestamp
                     }
@@ -645,22 +637,22 @@ function Add-ToQueue {
     param([string]$JsonPayload)
     
     try {
-        # Ensure directory exists
+        # make sure directory exists
         $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
         
-        # Check queue file size
+        # check if queue is too big
         if (Test-Path $QueueFile) {
             $fileInfo = Get-Item $QueueFile
             $sizeMB = $fileInfo.Length / 1MB
             
             if ($sizeMB -gt $MaxQueueSizeMB) {
-                # Read all lines, filter empty lines, keep only the most recent entries
+                # trim old entries to keep queue manageable
                 $allLines = @(Get-Content $QueueFile)
                 $allLines = $allLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-                $maxLines = [Math]::Floor(($MaxQueueSizeMB * 1MB) / 500)  # Rough estimate: ~500 bytes per line
+                $maxLines = [Math]::Floor(($MaxQueueSizeMB * 1MB) / 500)  # ~500 bytes per line
                 $linesToKeep = $allLines | Select-Object -Last $maxLines
                 
-                # Write back the trimmed queue
+                # save the trimmed queue
                 if ($linesToKeep.Count -gt 0) {
                     Set-Content -Path $QueueFile -Value $linesToKeep -ErrorAction Stop
                 } else {
@@ -669,7 +661,7 @@ function Add-ToQueue {
             }
         }
         
-        # Append new entry
+        # add new item to queue
         Add-Content -Path $QueueFile -Value $JsonPayload -ErrorAction Stop
     } catch {
         Write-ErrorLog "Error: Failed to add to queue - $($_.Exception.Message)"
@@ -690,7 +682,7 @@ function Send-Heartbeat {
         
         $response = Invoke-RestMethod -Uri $Config.ApiUrl -Method Post -Headers $headers -Body $Payload -ContentType "application/json" -ErrorAction Stop
         
-        # Log successful heartbeat
+        # log it
         $responseStr = if ($response) { ($response | ConvertTo-Json -Compress) } else { "OK" }
         Write-HeartbeatLog -Payload $Payload -Response $responseStr
         
@@ -710,7 +702,7 @@ function Process-Queue {
     
     try {
         $queuedItems = @(Get-Content $QueueFile)
-        # Filter out empty lines
+        # skip empty lines
         $queuedItems = $queuedItems | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         
         if ($queuedItems.Count -eq 0) {
@@ -726,7 +718,7 @@ function Process-Queue {
         $allSucceeded = $true
         $processedCount = 0
         
-        # Process in batches of 50
+        # send queued items in batches
         for ($i = 0; $i -lt $queuedItems.Count; $i += $BatchSize) {
             $batch = $queuedItems[$i..([Math]::Min($i + $BatchSize - 1, $queuedItems.Count - 1))]
             
@@ -735,7 +727,7 @@ function Process-Queue {
                     $response = Invoke-RestMethod -Uri $Config.ApiUrl -Method Post -Headers $headers -Body $item -ContentType "application/json" -ErrorAction Stop
                     $processedCount++
                     
-                    # Log successful queued heartbeat
+                    # log queued item sent
                     $responseStr = if ($response) { ($response | ConvertTo-Json -Compress) } else { "OK" }
                     Write-HeartbeatLog -Payload $item -Response $responseStr
                 } catch {
@@ -750,11 +742,11 @@ function Process-Queue {
             }
         }
         
-        # Only delete queue file if all items were successfully sent
+        # clear queue if everything sent
         if ($allSucceeded -and $processedCount -eq $queuedItems.Count) {
             Remove-Item -Path $QueueFile -Force -ErrorAction Stop
         } else {
-            # Remove successfully sent items from queue
+            # remove items that sent successfully
             if ($processedCount -gt 0) {
                 $remainingItems = $queuedItems | Select-Object -Skip $processedCount
                 if ($remainingItems.Count -gt 0) {
@@ -799,7 +791,7 @@ function Build-HeartbeatPayload {
 
 #region Main Execution
 
-# Ensure data directory exists
+# create data directory if needed
 try {
     $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
 } catch {
@@ -807,38 +799,38 @@ try {
     exit 1
 }
 
-# Get configuration from registry
+# load config
 $config = Get-ConfigFromRegistry
 if (-not $config) {
     exit 1
 }
 
-# Build heartbeat payload
+# build the payload
 $payload = Build-HeartbeatPayload
 if (-not $payload) {
     exit 1
 }
 
-# Check adaptive polling
+# check if we should skip this beat
 $lastSendTime = Get-LastSendTime
 $idleTimeSeconds = Get-IdleTime
 $shouldSkip = Test-AdaptivePollingSkip -IdleTimeSeconds $idleTimeSeconds -LastSendTime $lastSendTime
 
 if ($shouldSkip) {
-    # Skip sending this heartbeat, but still try to process queue if we have connectivity
+    # skip heartbeat but process queue if possible
     Process-Queue -Config $config
     exit 0
 }
 
-# Try to send heartbeat
+# send the heartbeat
 $success = Send-Heartbeat -Config $config -Payload $payload
 
 if ($success) {
     Set-LastSendTime
-    # Process queue after successful heartbeat
+    # process any queued items
     Process-Queue -Config $config
 } else {
-    # Queue the failed heartbeat
+    # save for later
     Add-ToQueue -JsonPayload $payload
 }
 

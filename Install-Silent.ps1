@@ -1,22 +1,6 @@
 #Requires -Version 5.1
 #Requires -RunAsAdministrator
-<#
-.SYNOPSIS
-    Silent installation script for PC Monitoring Agent
-.DESCRIPTION
-    Installs the monitoring agent without GUI. Suitable for command-line installation.
-    Requires Administrator privileges.
-.PARAMETER ApiUrl
-    The API endpoint URL where heartbeats will be sent
-.PARAMETER ApiKey
-    The API key for authentication
-.PARAMETER ScriptPath
-    Optional. Path where Agent.ps1 will be installed. Defaults to $env:ProgramFiles\MyAgent\Agent.ps1
-.EXAMPLE
-    .\Install-Silent.ps1 -ApiUrl "https://api.example.com/heartbeat" -ApiKey "your-api-key-here"
-.EXAMPLE
-    .\Install-Silent.ps1 -ApiUrl "https://api.example.com/heartbeat" -ApiKey "your-api-key" -ScriptPath "C:\Custom\Path\Agent.ps1"
-#>
+# Silent installer - no GUI, just command line
 
 [CmdletBinding()]
 param(
@@ -40,14 +24,14 @@ function Write-InstallLog {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "[$timestamp] [$Level] $Message"
     try {
-        # Ensure log directory exists
+        # create log directory if needed
         $logDir = Split-Path -Path $InstallLogFile -Parent
         if (-not (Test-Path $logDir)) {
             $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
         }
         Add-Content -Path $InstallLogFile -Value $logMessage -ErrorAction Stop
     } catch {
-        # If we can't write to log, write to console
+        # just write to console if log fails
         Write-Host $logMessage
     }
     Write-Host $logMessage
@@ -63,7 +47,7 @@ function Test-UrlFormat {
     }
 }
 
-# Validate inputs
+# check inputs are valid
 if ([string]::IsNullOrWhiteSpace($ApiUrl)) {
     Write-InstallLog "ERROR: ApiUrl parameter is required" "ERROR"
     exit 1
@@ -84,7 +68,7 @@ Write-InstallLog "API URL: $ApiUrl"
 Write-InstallLog "Script Path: $ScriptPath"
 
 try {
-    # Create registry keys
+    # create registry keys
     Write-InstallLog "Creating registry keys..."
     if (-not (Test-Path $RegistryPath)) {
         $null = New-Item -Path $RegistryPath -Force -ErrorAction Stop
@@ -94,7 +78,7 @@ try {
     Set-ItemProperty -Path $RegistryPath -Name "ApiKey" -Value $ApiKey -Type String -ErrorAction Stop
     Write-InstallLog "Registry keys created successfully"
     
-    # Create data directory
+    # create data directory
     Write-InstallLog "Creating data directory..."
     if (-not (Test-Path $DataDirectory)) {
         $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
@@ -103,7 +87,7 @@ try {
         Write-InstallLog "Data directory already exists: $DataDirectory"
     }
     
-    # Ensure script directory exists and copy script if needed
+    # prep script location
     Write-InstallLog "Preparing script location..."
     $scriptDir = Split-Path -Path $ScriptPath -Parent
     if (-not (Test-Path $scriptDir)) {
@@ -111,7 +95,7 @@ try {
         Write-InstallLog "Created script directory: $scriptDir"
     }
     
-    # Copy Agent.ps1 to target location if it's different from current location
+    # copy Agent.ps1 if needed
     $currentScript = if ($PSScriptRoot) {
         Join-Path $PSScriptRoot "Agent.ps1"
     } else {
@@ -139,7 +123,7 @@ try {
         Write-InstallLog "Using existing Agent.ps1 at: $ScriptPath"
     }
     
-    # Remove existing task if it exists
+    # remove old task if exists
     Write-InstallLog "Checking for existing scheduled task..."
     $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existingTask) {
@@ -147,30 +131,29 @@ try {
         Write-InstallLog "Removed existing scheduled task: $TaskName"
     }
     
-    # Create scheduled task action
+    # create the task
     Write-InstallLog "Creating scheduled task..."
     $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
     
-    # Create scheduled task trigger (every 1 minute)
+    # run every minute
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
     
-    # Create scheduled task principal (run as logged-in user to allow GetLastInputInfo to work)
-    # Get the current logged-in user (works even when running as admin)
+    # run as current user
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    # Extract username if domain format (DOMAIN\username -> username)
+    # strip domain if present
     if ($currentUser -match '\\') {
         $currentUser = $currentUser.Split('\\')[-1]
     }
     $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
     
-    # Create scheduled task settings with Hidden flag to prevent window flashing
+    # task settings - keep it hidden
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false -Hidden
     
-    # Register the scheduled task
+    # register task
     $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "PC Monitoring Agent - Sends heartbeat data to monitoring API" -ErrorAction Stop
     Write-InstallLog "Scheduled task registered: $TaskName"
     
-    # Start the task immediately
+    # start it now
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     Write-InstallLog "Scheduled task started: $TaskName"
     
