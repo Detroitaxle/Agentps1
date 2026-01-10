@@ -6,7 +6,6 @@ $RegistryPath = "HKLM:\SOFTWARE\MyMonitoringAgent"
 $DataDirectory = "C:\ProgramData\MyAgent"
 $QueueFile = Join-Path $DataDirectory "queue.jsonl"
 $ErrorLogFile = Join-Path $DataDirectory "error.log"
-$HeartbeatLogFile = Join-Path $DataDirectory "heartbeat.log"
 $LastSendFile = Join-Path $DataDirectory "last_send.txt"
 $MaxQueueSizeMB = 10
 $BatchSize = 100  # process queue in larger batches
@@ -312,8 +311,6 @@ public class IdleTimeHelper {
     }
     
     try {
-        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        
         $idleSeconds = [IdleTimeHelper]::GetIdleTimeSeconds()
         
         return $idleSeconds
@@ -455,7 +452,7 @@ function Send-Heartbeat {
     }
 }
 
-function Process-Queue {
+function Invoke-Queue {
     param([hashtable]$Config)
     
     if (-not (Test-Path $QueueFile)) {
@@ -523,7 +520,7 @@ function Process-Queue {
     }
 }
 
-function Build-HeartbeatPayload {
+function New-HeartbeatPayload {
     $computerId = Get-ComputerUUID
     if (-not $computerId) {
         exit 1
@@ -568,7 +565,7 @@ if (-not $config) {
 }
 
 # build the payload
-$payload = Build-HeartbeatPayload
+$payload = New-HeartbeatPayload
 if (-not $payload) {
     exit 1
 }
@@ -580,7 +577,7 @@ $shouldSkip = Test-AdaptivePollingSkip -IdleTimeSeconds $idleTimeSeconds -LastSe
 
 if ($shouldSkip) {
     # skip heartbeat but process queue if possible
-    Process-Queue -Config $config
+    Invoke-Queue -Config $config
     exit 0
 }
 
@@ -590,7 +587,7 @@ $success = Send-Heartbeat -Config $config -Payload $payload
 if ($success) {
     Set-LastSendTime
     # process any queued items
-    Process-Queue -Config $config
+    Invoke-Queue -Config $config
 } else {
     # save for later
     Add-ToQueue -JsonPayload $payload
