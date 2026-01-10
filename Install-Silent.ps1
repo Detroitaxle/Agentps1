@@ -154,18 +154,17 @@ try {
     # Create scheduled task trigger (every 1 minute)
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
     
-    # Create scheduled task principal (run as SYSTEM)
     # Create scheduled task principal (run as logged-in user to allow GetLastInputInfo to work)
     # Get the current logged-in user (works even when running as admin)
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
     # Extract username if domain format (DOMAIN\username -> username)
     if ($currentUser -match '\\') {
-        $currentUser = $currentUser.Split('\')[-1]
+        $currentUser = $currentUser.Split('\\')[-1]
     }
     $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
     
-    # Create scheduled task settings
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false
+    # Create scheduled task settings with Hidden flag to prevent window flashing
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false -Hidden
     
     # Register the scheduled task
     $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "PC Monitoring Agent - Sends heartbeat data to monitoring API" -ErrorAction Stop
@@ -180,7 +179,7 @@ try {
     Write-Host "Installation completed successfully!" -ForegroundColor Green
     Write-Host "Task Name: $TaskName" -ForegroundColor Cyan
     Write-Host "Runs: Every 1 minute" -ForegroundColor Cyan
-    Write-Host "Account: SYSTEM" -ForegroundColor Cyan
+    Write-Host "Account: $currentUser (Interactive)" -ForegroundColor Cyan
     Write-Host "Installation log: $InstallLogFile" -ForegroundColor Cyan
     exit 0
     
