@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Monitoring agent - sends heartbeat data every minute
+# Main monitoring agent - sends system info to API every minute
 
 #region Configuration
 $RegistryPath = "HKLM:\SOFTWARE\MyMonitoringAgent"
@@ -8,9 +8,9 @@ $QueueFile = Join-Path $DataDirectory "queue.jsonl"
 $ErrorLogFile = Join-Path $DataDirectory "error.log"
 $LastSendFile = Join-Path $DataDirectory "last_send.txt"
 $MaxQueueSizeMB = 10
-$BatchSize = 100  # process queue in larger batches
-$AdaptivePollingThreshold = 600  # 10 minutes
-$AdaptivePollingInterval = 300   # 5 minutes
+$BatchSize = 100  # send 100 queued items at a time
+$AdaptivePollingThreshold = 600  # 10 minutes idle
+$AdaptivePollingInterval = 300   # wait 5 minutes between sends when idle
 #endregion
 
 #region Helper Functions
@@ -22,12 +22,12 @@ function Write-ErrorLog {
     try {
         Add-Content -Path $ErrorLogFile -Value $logMessage -ErrorAction Stop
     } catch {
-        # can't write the log? nothing we can do
+        # log write failed, nothing we can do
     }
 }
 
 function Write-HeartbeatLog {
-    # Disabled for performance - keeping function signature for compatibility
+    # disabled to keep things fast
     param(
         [string]$Payload,
         [string]$Response = $null
@@ -66,16 +66,16 @@ function Get-ComputerUUID {
 
 function Get-UptimeFormatted {
     try {
-        # use TickCount64 directly for performance
+        # get system uptime in milliseconds
         $ticks = [Environment]::TickCount64
-        if ($ticks -le 0) {
-            Write-ErrorLog "Error: TickCount64 returned $ticks"
+        if ($ticks -lt 0) {
+            Write-ErrorLog "Error: TickCount64 returned negative value: $ticks"
             return "00:00:00"
         }
         
         $uptime = [TimeSpan]::FromMilliseconds($ticks)
         
-        # format uptime nicely
+        # show days if needed, otherwise just hours:minutes:seconds
         if ($uptime.Days -gt 0) {
             return "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
         } else {
@@ -88,10 +88,10 @@ function Get-UptimeFormatted {
 }
 
 function Get-IdleTime {
-    # call Windows API to get idle time
-    # works in both SYSTEM and user contexts
+    # get time since last keyboard/mouse input
+    # works when running as user or system account
     
-    # check if we already loaded this
+    # check if the helper class is already loaded
     $typeExists = $false
     try {
         $null = [IdleTimeHelper]::GetIdleTimeSeconds()
@@ -234,11 +234,11 @@ public class IdleTimeHelper {
             uint activeSessionId = WTSGetActiveConsoleSessionId();
             
             if (activeSessionId == 0xFFFFFFFF || activeSessionId == 0) {
-                // No active console session
+                // nobody logged in
                 return 0;
             }
             
-            // Try to get the session's user token and impersonate it
+            // get the logged-in user's token so we can check their idle time
             IntPtr hSessionToken = IntPtr.Zero;
             IntPtr hDupToken = IntPtr.Zero;
             IntPtr hThread = GetCurrentThread();
@@ -248,24 +248,23 @@ public class IdleTimeHelper {
                 bool wtsQueryResult = WTSQueryUserToken(activeSessionId, out hSessionToken);
                 
                 if (wtsQueryResult) {
-                    // Duplicate the token for impersonation
+                    // make a copy of the token
                     bool dupTokenResult = DuplicateTokenEx(hSessionToken, TOKEN_QUERY | TOKEN_DUPLICATE, IntPtr.Zero, SecurityImpersonation, TokenImpersonation, out hDupToken);
                     
                     if (dupTokenResult) {
-                        // Try ImpersonateLoggedOnUser instead of SetThreadToken (more reliable for SYSTEM)
+                        // switch to the user's context
                         bool impersonateResult = ImpersonateLoggedOnUser(hDupToken);
                         
                         if (impersonateResult) {
-                            // Now try GetLastInputInfo again in the impersonated context
+                            // try getting idle time again as the user
                             LASTINPUTINFO lastInput2 = new LASTINPUTINFO();
                             lastInput2.cbSize = (uint)Marshal.SizeOf(lastInput2);
                             
                             bool getLastInput2Result = GetLastInputInfo(ref lastInput2);
                             
-                            // Check if GetLastInputInfo succeeded AND returned valid data (dwTime != 0)
+                            // if it worked this time
                             if (getLastInput2Result && lastInput2.dwTime != 0) {
-                                // Success - calculate idle time
-                                // Use TickCount (32-bit) and handle wraparound
+                                // calculate idle time
                                 uint currentTicks = (uint)Environment.TickCount;
                                 uint lastInputTicks32 = lastInput2.dwTime;
                                 
@@ -273,18 +272,18 @@ public class IdleTimeHelper {
                                 if (currentTicks >= lastInputTicks32) {
                                     idleMs = currentTicks - lastInputTicks32;
                                 } else {
-                                    // Handle wraparound (occurs every ~49.7 days)
+                                    // handle wraparound
                                     idleMs = (uint.MaxValue - lastInputTicks32) + currentTicks + 1;
                                 }
                                 
-                                // Revert impersonation
+                                // switch back to our original context
                                 RevertToSelf();
                                 
                                 int result = (int)(idleMs / 1000);
                                 return result;
                             }
                             
-                            // Revert impersonation
+                            // switch back
                             RevertToSelf();
                         }
                     }
@@ -293,8 +292,8 @@ public class IdleTimeHelper {
                 if (hDupToken != IntPtr.Zero) CloseHandle(hDupToken);
                 if (hSessionToken != IntPtr.Zero) CloseHandle(hSessionToken);
             }
-        } catch (Exception ex) {
-            // Impersonation failed, return 0
+        } catch {
+            // couldn't get idle time, return 0
         }
         
         return 0;
@@ -326,7 +325,7 @@ function Get-CurrentUsername {
         if (-not $username) {
             $username = if ($env:USERNAME) { $env:USERNAME } else { "SYSTEM" }
         }
-        # strip domain if present
+        # remove domain part if username has one
         if ($username -match '\\') {
             $username = $username.Split('\')[-1]
         }
@@ -343,12 +342,12 @@ function Get-LastSendTime {
             if ($content) {
                 $trimmed = $content.Trim()
                 if ($trimmed) {
-                    # parse the timestamp
+                    # read the timestamp
                     try {
                         $timestamp = [DateTime]::Parse($trimmed, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
                         return $timestamp
                     } catch {
-                        # try basic parsing
+                        # try simpler format
                         $timestamp = [DateTime]::Parse($trimmed)
                         return $timestamp
                     }
@@ -396,22 +395,22 @@ function Add-ToQueue {
     param([string]$JsonPayload)
     
     try {
-        # make sure directory exists
+        # create data directory if it doesn't exist
         $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
         
-        # check if queue is too big
+        # if queue file is getting too large, trim old items
         if (Test-Path $QueueFile) {
             $fileInfo = Get-Item $QueueFile
             $sizeMB = $fileInfo.Length / 1MB
             
             if ($sizeMB -gt $MaxQueueSizeMB) {
-                # trim old entries to keep queue manageable
+                # keep only the most recent items
                 $allLines = @(Get-Content $QueueFile)
                 $allLines = $allLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
                 $maxLines = [Math]::Floor(($MaxQueueSizeMB * 1MB) / 500)  # ~500 bytes per line
                 $linesToKeep = $allLines | Select-Object -Last $maxLines
                 
-                # save the trimmed queue
+                # write back the trimmed queue
                 if ($linesToKeep.Count -gt 0) {
                     Set-Content -Path $QueueFile -Value $linesToKeep -ErrorAction Stop
                 } else {
@@ -420,7 +419,7 @@ function Add-ToQueue {
             }
         }
         
-        # add new item to queue
+        # add this heartbeat to the queue
         Add-Content -Path $QueueFile -Value $JsonPayload -ErrorAction Stop
     } catch {
         Write-ErrorLog "Error: Failed to add to queue - $($_.Exception.Message)"
@@ -441,7 +440,7 @@ function Send-Heartbeat {
         
         $response = Invoke-RestMethod -Uri $Config.ApiUrl -Method Post -Headers $headers -Body $Payload -ContentType "application/json" -ErrorAction Stop
         
-        # log it
+        # log the response
         $responseStr = if ($response) { ($response | ConvertTo-Json -Compress) } else { "OK" }
         Write-HeartbeatLog -Payload $Payload -Response $responseStr
         
@@ -461,7 +460,7 @@ function Invoke-Queue {
     
     try {
         $queuedItems = @(Get-Content $QueueFile)
-        # skip empty lines
+        # ignore empty lines in queue file
         $queuedItems = $queuedItems | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         
         if ($queuedItems.Count -eq 0) {
@@ -477,7 +476,7 @@ function Invoke-Queue {
         $processedCount = 0
         $failedItems = @()
         
-        # send queued items in batches
+        # send items in batches to avoid overloading
         for ($i = 0; $i -lt $queuedItems.Count; $i += $BatchSize) {
             $batch = $queuedItems[$i..([Math]::Min($i + $BatchSize - 1, $queuedItems.Count - 1))]
             
@@ -486,7 +485,7 @@ function Invoke-Queue {
                     $response = Invoke-RestMethod -Uri $Config.ApiUrl -Method Post -Headers $headers -Body $item -ContentType "application/json" -ErrorAction Stop
                     $processedCount++
                     
-                    # log queued item sent
+                    # log successful send
                     $responseStr = if ($response) { ($response | ConvertTo-Json -Compress) } else { "OK" }
                     Write-HeartbeatLog -Payload $item -Response $responseStr
                 } catch {
@@ -496,16 +495,16 @@ function Invoke-Queue {
             }
         }
         
-        # update queue with failed items only
+        # save only the items that failed
         if ($failedItems.Count -eq 0) {
-            # all items sent successfully
+            # everything sent, delete queue file
             Remove-Item -Path $QueueFile -Force -ErrorAction Stop
         } else {
-            # keep failed items in queue
+            # save failed items back to queue
             if ($failedItems.Count -lt $queuedItems.Count) {
                 Set-Content -Path $QueueFile -Value $failedItems -ErrorAction Stop
             }
-            # if all failed, queue file remains as is (no need to rewrite)
+            # if everything failed, queue file stays as-is
         }
     } catch {
         Write-ErrorLog "Error: Failed to process queue - $($_.Exception.Message)"
@@ -543,7 +542,7 @@ function New-HeartbeatPayload {
 
 #region Main Execution
 
-# create data directory if needed
+# make sure data directory exists
 try {
     $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
 } catch {
@@ -551,40 +550,40 @@ try {
     exit 1
 }
 
-# load config
+# get API URL and key from registry
 $config = Get-ConfigFromRegistry
 if (-not $config) {
     exit 1
 }
 
-# get idle time once for both adaptive polling check and payload
+# check how long since user last touched keyboard/mouse
 $idleTimeSeconds = Get-IdleTime
 
-# check if we should skip this beat
+# skip sending if computer is idle (adaptive polling)
 $lastSendTime = Get-LastSendTime
 $shouldSkip = Test-AdaptivePollingSkip -IdleTimeSeconds $idleTimeSeconds -LastSendTime $lastSendTime
 
 if ($shouldSkip) {
-    # skip heartbeat but process queue if possible
+    # don't send new heartbeat, but try to send queued items
     Invoke-Queue -Config $config
     exit 0
 }
 
-# build the payload
+# gather system info and build JSON payload
 $payload = New-HeartbeatPayload -IdleTimeSeconds $idleTimeSeconds
 if (-not $payload) {
     exit 1
 }
 
-# send the heartbeat
+# send heartbeat to API
 $success = Send-Heartbeat -Config $config -Payload $payload
 
 if ($success) {
     Set-LastSendTime
-    # process any queued items
+    # send any items waiting in queue
     Invoke-Queue -Config $config
 } else {
-    # save for later
+    # save to queue for retry later
     Add-ToQueue -JsonPayload $payload
 }
 

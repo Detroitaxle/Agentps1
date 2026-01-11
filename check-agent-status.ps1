@@ -1,9 +1,9 @@
-# Shows agent status and recent activity
+# Check agent status and recent activity
 
 Write-Host "=== Agent Status Check ===" -ForegroundColor Cyan
 Write-Host ""
 
-# Check Scheduled Task
+# check scheduled task
 Write-Host "Scheduled Task Status:" -ForegroundColor Yellow
 try {
     $task = Get-ScheduledTask -TaskName "MyPCMonitor" -ErrorAction Stop
@@ -19,7 +19,7 @@ try {
 }
 Write-Host ""
 
-# check config
+# check registry config
 Write-Host "Registry Configuration:" -ForegroundColor Yellow
 try {
     $apiUrl = (Get-ItemProperty -Path "HKLM:\SOFTWARE\MyMonitoringAgent" -Name "ApiUrl" -ErrorAction Stop).ApiUrl
@@ -32,7 +32,7 @@ try {
 }
 Write-Host ""
 
-# Check Data Directory
+# check data directory
 $DataDirectory = "C:\ProgramData\MyAgent"
 $LastSendFile = Join-Path $DataDirectory "last_send.txt"
 $QueueFile = Join-Path $DataDirectory "queue.jsonl"
@@ -46,7 +46,7 @@ if (Test-Path $DataDirectory) {
 }
 Write-Host ""
 
-# when did we last send?
+# check last send time
 Write-Host "Last Send Status:" -ForegroundColor Yellow
 if (Test-Path $LastSendFile) {
     try {
@@ -72,7 +72,7 @@ if (Test-Path $LastSendFile) {
 }
 Write-Host ""
 
-# check queue
+# check queue file
 Write-Host "Queue Status:" -ForegroundColor Yellow
 if (Test-Path $QueueFile) {
     try {
@@ -96,7 +96,7 @@ if (Test-Path $QueueFile) {
 }
 Write-Host ""
 
-# recent errors
+# show recent errors
 Write-Host "Recent Errors (last 10 lines):" -ForegroundColor Yellow
 if (Test-Path $ErrorLogFile) {
     try {
@@ -116,10 +116,10 @@ if (Test-Path $ErrorLogFile) {
 }
 Write-Host ""
 
-# current state
+# show current system state
 Write-Host "Current System State:" -ForegroundColor Yellow
 try {
-    # Get idle time
+    # get idle time
     $csharpCode = @"
 using System;
 using System.Runtime.InteropServices;
@@ -184,7 +184,7 @@ public class IdleTimeHelper {
     Write-Host "  Uptime: $uptimeFormatted" -ForegroundColor Gray
     Write-Host "  Idle Time: $idleSeconds seconds ($([Math]::Floor($idleSeconds / 60)) minutes)" -ForegroundColor $(if ($idleSeconds -gt 600) { "Yellow" } else { "Green" })
     
-    # check if adaptive polling is active
+    # check adaptive polling status
     if (Test-Path $LastSendFile) {
         try {
             $content = Get-Content $LastSendFile -Raw
@@ -197,7 +197,7 @@ public class IdleTimeHelper {
                 }
                 $timeSince = ([DateTime]::UtcNow - $lastSend).TotalSeconds
                 
-                # use same constants as Agent.ps1
+                # match Agent.ps1 settings
                 $AdaptivePollingThreshold = 600  # 10 minutes
                 $AdaptivePollingInterval = 300   # 5 minutes
                 

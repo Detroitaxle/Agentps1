@@ -2,19 +2,18 @@
 #Requires -RunAsAdministrator
 # GUI installer with Windows Forms
 
-# handle errors properly
 $ErrorActionPreference = "Stop"
 
-# load Windows Forms early for errors
+# load Windows Forms
 try {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
     Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
 } catch {
-    # fall back to console if Forms won't load
+    # Forms not available, will use console instead
 }
 
 try {
-    # make sure we're running as admin
+    # check admin privileges
     $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
     $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     
@@ -37,7 +36,7 @@ try {
         exit 1
     }
     
-    # load Forms now that we're admin
+    # load Windows Forms
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
     Add-Type -AssemblyName System.Drawing -ErrorAction Stop
 } catch {
@@ -109,25 +108,25 @@ function Test-ApiConnection {
             timestamp = (Get-Date).ToUniversalTime().ToString("o")
         } | ConvertTo-Json -Compress
         
-        # call the API
+        # try sending to API
         try {
             $response = Invoke-RestMethod -Uri $ApiUrl -Method Post -Headers $headers -Body $testPayload -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
             $responseJson = if ($response) { $response | ConvertTo-Json -Compress } else { "OK" }
             return @{ Success = $true; Message = "Connection successful - API responded with: $responseJson" }
         } catch {
-            # check if server is reachable
+            # check if we can reach the server
             $httpException = $_.Exception
             if ($httpException.Response) {
                 try {
                     $statusCode = $httpException.Response.StatusCode.value__
-                    # 400/401/403 means endpoint exists
+                    # these errors mean server is reachable, just wrong auth/data
                     if ($statusCode -in @(400, 401, 403)) {
                         return @{ Success = $true; Message = "Server responded (Status $statusCode) - endpoint is reachable" }
                     }
-                    # any other status
+                    # other error codes
                     return @{ Success = $false; Message = "Server responded with HTTP $statusCode - check API endpoint and key" }
                 } catch {
-                    # can't get status code but server responded
+                    # server responded but couldn't get status code
                     return @{ Success = $true; Message = "Server responded (endpoint is reachable)" }
                 }
             }
@@ -157,18 +156,18 @@ function Install-Agent {
         Set-ItemProperty -Path $RegistryPath -Name "ApiUrl" -Value $ApiUrl -Type String
         Set-ItemProperty -Path $RegistryPath -Name "ApiKey" -Value $ApiKey -Type String
         
-        # create data folder
+        # create data directory
         if (-not (Test-Path $DataDirectory)) {
             $null = New-Item -ItemType Directory -Path $DataDirectory -Force
         }
         
-        # make sure script location exists
+        # create install directory
         $scriptDir = Split-Path -Path $ScriptPath -Parent
         if (-not (Test-Path $scriptDir)) {
             $null = New-Item -ItemType Directory -Path $scriptDir -Force
         }
         
-        # copy Agent.ps1 if needed
+        # copy agent script
         $currentScript = if ($PSScriptRoot) {
             Join-Path $PSScriptRoot "Agent.ps1"
         } else {
@@ -190,16 +189,34 @@ function Install-Agent {
             throw "Agent.ps1 not found in script directory and target path does not exist"
         }
         
-        # clear old task
+        # copy VBScript wrapper to hide window
+        $vbScriptSource = if ($PSScriptRoot) {
+            Join-Path $PSScriptRoot "RunAgentHidden.vbs"
+        } else {
+            Join-Path (Get-Location) "RunAgentHidden.vbs"
+        }
+        $vbScriptTarget = Join-Path $scriptDir "RunAgentHidden.vbs"
+        
+        if (Test-Path $vbScriptSource) {
+            Copy-Item -Path $vbScriptSource -Destination $vbScriptTarget -Force
+        }
+        
+        # remove existing task if present
         $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
         if ($existingTask) {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
         
-        # create task
-        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+        # create scheduled task using VBScript wrapper
+        $vbScriptPath = Join-Path $scriptDir "RunAgentHidden.vbs"
+        if (Test-Path $vbScriptPath) {
+            $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbScriptPath`""
+        } else {
+            # use PowerShell directly if VBScript missing
+            $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+        }
         
-        # every minute
+        # run every minute
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
         
         # run as current user

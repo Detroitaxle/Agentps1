@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 #Requires -RunAsAdministrator
-# Silent installer - no GUI, just command line
+# Command-line installer (no GUI)
 
 [CmdletBinding()]
 param(
@@ -24,14 +24,14 @@ function Write-InstallLog {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "[$timestamp] [$Level] $Message"
     try {
-        # create log directory if needed
+        # create log directory
         $logDir = Split-Path -Path $InstallLogFile -Parent
         if (-not (Test-Path $logDir)) {
             $null = New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop
         }
         Add-Content -Path $InstallLogFile -Value $logMessage -ErrorAction Stop
     } catch {
-        # just write to console if log fails
+        # write to console if file logging fails
         Write-Host $logMessage
     }
     Write-Host $logMessage
@@ -47,7 +47,7 @@ function Test-UrlFormat {
     }
 }
 
-# check inputs are valid
+# validate inputs
 if ([string]::IsNullOrWhiteSpace($ApiUrl)) {
     Write-InstallLog "ERROR: ApiUrl parameter is required" "ERROR"
     exit 1
@@ -68,7 +68,7 @@ Write-InstallLog "API URL: $ApiUrl"
 Write-InstallLog "Script Path: $ScriptPath"
 
 try {
-    # create registry keys
+    # save API settings to registry
     Write-InstallLog "Creating registry keys..."
     if (-not (Test-Path $RegistryPath)) {
         $null = New-Item -Path $RegistryPath -Force -ErrorAction Stop
@@ -78,7 +78,7 @@ try {
     Set-ItemProperty -Path $RegistryPath -Name "ApiKey" -Value $ApiKey -Type String -ErrorAction Stop
     Write-InstallLog "Registry keys created successfully"
     
-    # create data directory
+    # create data folder
     Write-InstallLog "Creating data directory..."
     if (-not (Test-Path $DataDirectory)) {
         $null = New-Item -ItemType Directory -Path $DataDirectory -Force -ErrorAction Stop
@@ -87,7 +87,7 @@ try {
         Write-InstallLog "Data directory already exists: $DataDirectory"
     }
     
-    # prep script location
+    # create install directory
     Write-InstallLog "Preparing script location..."
     $scriptDir = Split-Path -Path $ScriptPath -Parent
     if (-not (Test-Path $scriptDir)) {
@@ -95,7 +95,7 @@ try {
         Write-InstallLog "Created script directory: $scriptDir"
     }
     
-    # copy Agent.ps1 if needed
+    # copy agent script
     $currentScript = if ($PSScriptRoot) {
         Join-Path $PSScriptRoot "Agent.ps1"
     } else {
@@ -123,7 +123,22 @@ try {
         Write-InstallLog "Using existing Agent.ps1 at: $ScriptPath"
     }
     
-    # remove old task if exists
+    # copy VBScript wrapper to hide window
+    $vbScriptSource = if ($PSScriptRoot) {
+        Join-Path $PSScriptRoot "RunAgentHidden.vbs"
+    } else {
+        Join-Path (Get-Location) "RunAgentHidden.vbs"
+    }
+    $vbScriptTarget = Join-Path $scriptDir "RunAgentHidden.vbs"
+    
+    if (Test-Path $vbScriptSource) {
+        Copy-Item -Path $vbScriptSource -Destination $vbScriptTarget -Force -ErrorAction Stop
+        Write-InstallLog "Copied RunAgentHidden.vbs to: $vbScriptTarget"
+    } else {
+        Write-InstallLog "WARNING: RunAgentHidden.vbs not found, window flickering may occur" "WARNING"
+    }
+    
+    # remove existing task if present
     Write-InstallLog "Checking for existing scheduled task..."
     $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existingTask) {
@@ -131,22 +146,29 @@ try {
         Write-InstallLog "Removed existing scheduled task: $TaskName"
     }
     
-    # create the task
+    # create scheduled task using VBScript wrapper
     Write-InstallLog "Creating scheduled task..."
-    $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+    $vbScriptPath = Join-Path $scriptDir "RunAgentHidden.vbs"
+    if (Test-Path $vbScriptPath) {
+        $action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "`"$vbScriptPath`""
+    } else {
+        # use PowerShell directly if VBScript missing
+        Write-InstallLog "WARNING: Using PowerShell directly (VBScript wrapper not found)" "WARNING"
+        $action = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument "-NoProfile -NonInteractive -NoLogo -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptPath`""
+    }
     
     # run every minute
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 365)
     
-    # run as current user
+    # run as logged-in user
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    # strip domain if present
+    # remove domain from username if present
     if ($currentUser -match '\\') {
         $currentUser = $currentUser.Split('\\')[-1]
     }
     $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
     
-    # task settings - keep it hidden
+    # task settings - run hidden
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RunOnlyIfNetworkAvailable:$false -Hidden
     
     # register task
