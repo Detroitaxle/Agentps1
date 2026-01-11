@@ -175,7 +175,7 @@ public class IdleTimeHelper {
     $uptimeFormatted = if ($uptime.Days -gt 0) {
         "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
     } else {
-        $uptime.ToString("hh\:mm\:ss")
+        $uptime.ToString("HH\:mm\:ss")
     }
     
     Write-Host "  Computer ID: $computerId" -ForegroundColor Gray
@@ -197,8 +197,12 @@ public class IdleTimeHelper {
                 }
                 $timeSince = ([DateTime]::UtcNow - $lastSend).TotalSeconds
                 
-                if ($idleSeconds -gt 600 -and $timeSince -lt 300) {
-                    Write-Host "  Adaptive Polling: [ACTIVE] - Next heartbeat will be skipped (idle > 10min, last send < 5min ago)" -ForegroundColor Yellow
+                # use same constants as Agent.ps1
+                $AdaptivePollingThreshold = 600  # 10 minutes
+                $AdaptivePollingInterval = 300   # 5 minutes
+                
+                if ($idleSeconds -gt $AdaptivePollingThreshold -and $timeSince -lt $AdaptivePollingInterval) {
+                    Write-Host "  Adaptive Polling: [ACTIVE] - Next heartbeat will be skipped (idle > $($AdaptivePollingThreshold/60)min, last send < $($AdaptivePollingInterval/60)min ago)" -ForegroundColor Yellow
                 } else {
                     Write-Host "  Adaptive Polling: [INACTIVE] - Next heartbeat will be sent normally" -ForegroundColor Green
                 }

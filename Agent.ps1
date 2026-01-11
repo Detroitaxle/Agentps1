@@ -9,8 +9,8 @@ $ErrorLogFile = Join-Path $DataDirectory "error.log"
 $LastSendFile = Join-Path $DataDirectory "last_send.txt"
 $MaxQueueSizeMB = 10
 $BatchSize = 100  # process queue in larger batches
-$AdaptivePollingThreshold = 1800  # 30 minutes
-$AdaptivePollingInterval = 600   # 10 minutes
+$AdaptivePollingThreshold = 600  # 10 minutes
+$AdaptivePollingInterval = 300   # 5 minutes
 #endregion
 
 #region Helper Functions
@@ -20,7 +20,7 @@ function Write-ErrorLog {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "[$timestamp] $Message"
     try {
-        Add-Content -Path $ErrorLogFile -Value $LogMessage -ErrorAction Stop
+        Add-Content -Path $ErrorLogFile -Value $logMessage -ErrorAction Stop
     } catch {
         # can't write the log? nothing we can do
     }
@@ -79,7 +79,7 @@ function Get-UptimeFormatted {
         if ($uptime.Days -gt 0) {
             return "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
         } else {
-            return $uptime.ToString("hh\:mm\:ss")
+            return $uptime.ToString("HH\:mm\:ss")
         }
     } catch {
         Write-ErrorLog "Error: Failed to calculate uptime - $($_.Exception.Message)"
@@ -474,8 +474,8 @@ function Invoke-Queue {
             "X-API-KEY" = $Config.ApiKey
         }
         
-        $allSucceeded = $true
         $processedCount = 0
+        $failedItems = @()
         
         # send queued items in batches
         for ($i = 0; $i -lt $queuedItems.Count; $i += $BatchSize) {
@@ -491,29 +491,21 @@ function Invoke-Queue {
                     Write-HeartbeatLog -Payload $item -Response $responseStr
                 } catch {
                     Write-ErrorLog "Queue Error: Failed to send queued item - $($_.Exception.Message)"
-                    $allSucceeded = $false
-                    break
+                    $failedItems += $item
                 }
-            }
-            
-            if (-not $allSucceeded) {
-                break
             }
         }
         
-        # clear queue if everything sent
-        if ($allSucceeded -and $processedCount -eq $queuedItems.Count) {
+        # update queue with failed items only
+        if ($failedItems.Count -eq 0) {
+            # all items sent successfully
             Remove-Item -Path $QueueFile -Force -ErrorAction Stop
         } else {
-            # remove items that sent successfully
-            if ($processedCount -gt 0) {
-                $remainingItems = $queuedItems | Select-Object -Skip $processedCount
-                if ($remainingItems.Count -gt 0) {
-                    Set-Content -Path $QueueFile -Value $remainingItems -ErrorAction Stop
-                } else {
-                    Remove-Item -Path $QueueFile -Force -ErrorAction Stop
-                }
+            # keep failed items in queue
+            if ($failedItems.Count -lt $queuedItems.Count) {
+                Set-Content -Path $QueueFile -Value $failedItems -ErrorAction Stop
             }
+            # if all failed, queue file remains as is (no need to rewrite)
         }
     } catch {
         Write-ErrorLog "Error: Failed to process queue - $($_.Exception.Message)"
@@ -521,6 +513,8 @@ function Invoke-Queue {
 }
 
 function New-HeartbeatPayload {
+    param([int]$IdleTimeSeconds)
+    
     $computerId = Get-ComputerUUID
     if (-not $computerId) {
         exit 1
@@ -529,7 +523,6 @@ function New-HeartbeatPayload {
     $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { "UNKNOWN" }
     $username = Get-CurrentUsername
     $uptime = Get-UptimeFormatted
-    $idleTimeSeconds = Get-IdleTime
     $timestamp = [DateTime]::UtcNow.ToString("o")
     
     $payload = @{
@@ -564,21 +557,23 @@ if (-not $config) {
     exit 1
 }
 
-# build the payload
-$payload = New-HeartbeatPayload
-if (-not $payload) {
-    exit 1
-}
+# get idle time once for both adaptive polling check and payload
+$idleTimeSeconds = Get-IdleTime
 
 # check if we should skip this beat
 $lastSendTime = Get-LastSendTime
-$idleTimeSeconds = Get-IdleTime
 $shouldSkip = Test-AdaptivePollingSkip -IdleTimeSeconds $idleTimeSeconds -LastSendTime $lastSendTime
 
 if ($shouldSkip) {
     # skip heartbeat but process queue if possible
     Invoke-Queue -Config $config
     exit 0
+}
+
+# build the payload
+$payload = New-HeartbeatPayload -IdleTimeSeconds $idleTimeSeconds
+if (-not $payload) {
+    exit 1
 }
 
 # send the heartbeat
