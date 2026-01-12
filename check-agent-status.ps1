@@ -170,7 +170,13 @@ public class IdleTimeHelper {
     } catch {
         if ($env:USERNAME) { $env:USERNAME } else { "SYSTEM" }
     }
-    $ticks = [Environment]::TickCount64
+    # Use TickCount (32-bit) which is always available, handle wraparound
+    $ticks32 = [Environment]::TickCount
+    $ticks = [long]$ticks32
+    if ($ticks32 -lt 0) {
+        # Handle 32-bit wraparound (occurs every ~49.7 days)
+        $ticks = [long]$ticks32 + [long]4294967296
+    }
     $uptime = [TimeSpan]::FromMilliseconds($ticks)
     $uptimeFormatted = if ($uptime.Days -gt 0) {
         "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds

@@ -67,10 +67,14 @@ function Get-ComputerUUID {
 function Get-UptimeFormatted {
     try {
         # get system uptime in milliseconds
-        $ticks = [Environment]::TickCount64
-        if ($ticks -lt 0) {
-            Write-ErrorLog "Error: TickCount64 returned negative value: $ticks"
-            return "00:00:00"
+        # Use TickCount (32-bit) which is always available
+        # Handle wraparound by converting negative values to positive
+        $ticks32 = [Environment]::TickCount
+        $ticks = [long]$ticks32
+        if ($ticks32 -lt 0) {
+            # Handle 32-bit wraparound (occurs every ~49.7 days)
+            # Convert negative value to positive by adding 2^32
+            $ticks = [long]$ticks32 + [long]4294967296
         }
         
         $uptime = [TimeSpan]::FromMilliseconds($ticks)
