@@ -79,7 +79,7 @@ function Get-UptimeFormatted {
         if ($uptime.Days -gt 0) {
             return "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
         } else {
-            return $uptime.ToString("HH\:mm\:ss")
+            return $uptime.ToString("hh\:mm\:ss")
         }
     } catch {
         Write-ErrorLog "Error: Failed to calculate uptime - $($_.Exception.Message)"

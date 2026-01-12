@@ -175,7 +175,7 @@ public class IdleTimeHelper {
     $uptimeFormatted = if ($uptime.Days -gt 0) {
         "{0:00}:{1:00}:{2:00}:{3:00}" -f $uptime.Days, $uptime.Hours, $uptime.Minutes, $uptime.Seconds
     } else {
-        $uptime.ToString("HH\:mm\:ss")
+        $uptime.ToString("hh\:mm\:ss")
     }
     
     Write-Host "  Computer ID: $computerId" -ForegroundColor Gray
